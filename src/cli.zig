@@ -6,6 +6,8 @@ const Connection = core.discovery.Connection;
 const Device = core.device.Device;
 const HitsConfig = core.device.HitsConfig;
 
+const json_schema_version: u8 = 1;
+
 const Options = struct {
     json: bool = false,
     dry_run: bool = false,
@@ -23,6 +25,24 @@ pub fn run(init: std.process.Init, stdout: *std.Io.Writer, stderr: *std.Io.Write
     const options = parsed.options;
     const words = parsed.words;
 
+    return runParsed(init, allocator, options, words, stdout, stderr) catch |err| {
+        if (options.json) try writeJson(stdout, .{
+            .schema_version = json_schema_version,
+            .ok = false,
+            .@"error" = @errorName(err),
+        });
+        return err;
+    };
+}
+
+fn runParsed(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    options: Options,
+    words: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
     if (words.len == 0 or eql(words[0], "help") or eql(words[0], "--help")) {
         try printHelp(stdout);
         return;
@@ -47,6 +67,8 @@ pub fn run(init: std.process.Init, stdout: *std.Io.Writer, stderr: *std.Io.Write
 
     if (eql(words[0], "status"))
         return status(device, connected.candidate, options, stdout);
+    if (eql(words[0], "snapshot"))
+        return snapshot(allocator, device, connected.candidate, options, stdout);
     if (eql(words[0], "doctor"))
         return doctor(init.io, allocator, device, connected.candidate, options, stdout);
     if (eql(words[0], "get"))
@@ -130,6 +152,7 @@ fn status(device: Device, candidate: Candidate, options: Options, out: *std.Io.W
     const active_sector = try device.currentProfile();
     const active_profile = try profileSlot(active_sector);
     const value = .{
+        .schema_version = json_schema_version,
         .path = candidate.path,
         .name = candidate.name,
         .connection = candidate.connection,
@@ -174,6 +197,96 @@ fn status(device: Device, candidate: Candidate, options: Options, out: *std.Io.W
         right.actuation,
         right.rapid_trigger,
         right.haptics,
+    });
+}
+
+fn snapshot(allocator: std.mem.Allocator, device: Device, candidate: Candidate, options: Options, out: *std.Io.Writer) !void {
+    const battery = try device.battery();
+    const hits_caps = try device.hitsCapabilities();
+    const left = try device.hitsConfig(0);
+    const right = try device.hitsConfig(1);
+    const reported_dpi = try device.currentDpi();
+    const reported_rate = try device.currentRate();
+    const dpi_range = try device.dpiRange();
+    const rate_mask = try device.supportedRateMask();
+    const active_sector = try device.currentProfile();
+    const active_profile = try profileSlot(active_sector);
+    const profile_info = try device.profileInfo();
+    if (profile_info.sector_size != core.profile.sector_size) return error.UnsupportedLayout;
+
+    var rates: std.ArrayList(u16) = .empty;
+    for ([_]u16{ 125, 250, 500, 1000, 2000, 4000, 8000 }, 0..) |hz, index| {
+        if ((rate_mask & (@as(u16, 1) << @intCast(index))) != 0)
+            try rates.append(allocator, hz);
+    }
+
+    var profiles: std.ArrayList(ProfileSummary) = .empty;
+    for (1..@as(usize, profile_info.count) + 1) |number| {
+        const sector: u8 = @intCast(number);
+        const bytes = try device.readSector(allocator, sector);
+        defer allocator.free(bytes);
+        core.profile.validate(bytes) catch {
+            try profiles.append(allocator, .{
+                .sector = sector,
+                .active = active_profile == sector,
+                .dpi_x = 0,
+                .dpi_y = 0,
+                .rate_hz = 0,
+                .crc_valid = false,
+            });
+            continue;
+        };
+        const saved_dpi = try core.profile.dpi(bytes);
+        try profiles.append(allocator, .{
+            .sector = sector,
+            .active = active_profile == sector,
+            .dpi_x = saved_dpi.x,
+            .dpi_y = saved_dpi.y,
+            .rate_hz = try core.profile.reportRate(bytes),
+            .crc_valid = true,
+        });
+    }
+
+    const value = .{
+        .schema_version = json_schema_version,
+        .device = .{
+            .path = candidate.path,
+            .name = candidate.name,
+            .connection = candidate.connection,
+            .device_index = device.session.device_index,
+        },
+        .battery = .{
+            .percent = battery.percent,
+            .charging = battery.charging(),
+            .charging_state = battery.charging_state,
+        },
+        .active_profile = active_profile,
+        .active_sector = active_sector,
+        .reported = .{
+            .dpi_x = reported_dpi.x,
+            .dpi_y = reported_dpi.y,
+            .rate_hz = reported_rate,
+        },
+        .supported = .{
+            .dpi = dpi_range,
+            .rate_mask = rate_mask,
+            .rates_hz = rates.items,
+        },
+        .hits = .{
+            .capabilities = hits_caps,
+            .left = left,
+            .right = right,
+        },
+        .profiles = profiles.items,
+    };
+    if (options.json) return writeJson(out, value);
+    try out.print("{s}: {d}%{s}, profile {d}, {d} DPI, {d} Hz\n", .{
+        candidate.name,
+        battery.percent,
+        if (battery.charging()) " (charging)" else "",
+        active_profile,
+        reported_dpi.x,
+        reported_rate,
     });
 }
 
@@ -267,18 +380,36 @@ fn set(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const 
             const mask = try device.supportedRateMask();
             if ((mask & (@as(u16, 1) << @intCast(rate_index))) == 0) return error.UnsupportedRate;
         }
-        if (!options.dry_run) try saveBackup(io, sector, bytes, out);
+        const backup = if (!options.dry_run) try saveBackup(io, allocator, sector, bytes) else null;
         if (setting_dpi)
             try core.profile.setDpi(bytes, numeric)
         else
             try core.profile.setReportRate(bytes, numeric);
 
         if (options.dry_run) {
+            if (options.json) return writeJson(out, .{
+                .schema_version = json_schema_version,
+                .ok = true,
+                .action = if (setting_dpi) "set_dpi" else "set_rate",
+                .dry_run = true,
+                .profile = sector,
+                .value = numeric,
+            });
             try out.print("dry run: profile {d} would be updated to {s} {d}\n", .{ sector, words[1], numeric });
             return;
         }
         try device.writeSector(allocator, sector, bytes);
         if (try profileSlot(try device.currentProfile()) == sector) try device.activateProfile(sector);
+        if (options.json) return writeJson(out, .{
+            .schema_version = json_schema_version,
+            .ok = true,
+            .action = if (setting_dpi) "set_dpi" else "set_rate",
+            .dry_run = false,
+            .profile = sector,
+            .value = numeric,
+            .backup = backup.?,
+        });
+        if (backup.?.created) try out.print("backup saved to {s}\n", .{backup.?.path});
         try out.print("profile {d} updated: {s} {d}\n", .{ sector, words[1], numeric });
         return;
     }
@@ -320,25 +451,41 @@ fn setHits(device: Device, words: []const []const u8, options: Options, out: *st
     if (rapid) |v| if (v < 1 or v > caps.max_rapid_trigger) return error.InvalidRapidTrigger;
     if (haptics) |v| if (v > caps.max_haptics) return error.InvalidHaptics;
 
+    var left_result: ?HitsConfig = null;
+    var right_result: ?HitsConfig = null;
     var button = first;
     while (button <= last) : (button += 1) {
         const current = try device.hitsConfig(button);
+        const desired: HitsConfig = .{
+            .button = button,
+            .actuation = actuation orelse current.actuation,
+            .rapid_trigger = rapid orelse current.rapid_trigger,
+            .haptics = haptics orelse current.haptics,
+            .sensitivity_flag = current.sensitivity_flag,
+        };
         if (options.dry_run) {
-            try out.print("dry run: {s}: actuation {d}->{d}, rapid {d}->{d}, haptics {d}->{d}\n", .{
-                buttonName(button),
-                current.actuation,
-                actuation orelse current.actuation,
-                current.rapid_trigger,
-                rapid orelse current.rapid_trigger,
-                current.haptics,
-                haptics orelse current.haptics,
-            });
+            if (button == 0) left_result = desired else right_result = desired;
+            if (!options.json)
+                try out.print("dry run: {s}: actuation {d}->{d}, rapid {d}->{d}, haptics {d}->{d}\n", .{
+                    buttonName(button),    current.actuation, desired.actuation, current.rapid_trigger,
+                    desired.rapid_trigger, current.haptics,   desired.haptics,
+                });
         } else {
             const updated = try device.setHits(button, actuation, rapid, haptics);
-            try printHits(out, buttonName(button), updated);
+            if (button == 0) left_result = updated else right_result = updated;
+            if (!options.json) try printHits(out, buttonName(button), updated);
         }
         if (button == 255) break;
     }
+    if (options.json) return writeJson(out, .{
+        .schema_version = json_schema_version,
+        .ok = true,
+        .action = "set_hits",
+        .dry_run = options.dry_run,
+        .target = words[2],
+        .left = left_result,
+        .right = right_result,
+    });
 }
 
 fn profileCommand(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const []const u8, options: Options, out: *std.Io.Writer) !void {
@@ -356,10 +503,24 @@ fn profileCommand(io: std.Io, allocator: std.mem.Allocator, device: Device, word
     }
     if (eql(words[1], "activate")) {
         if (options.dry_run) {
+            if (options.json) return writeJson(out, .{
+                .schema_version = json_schema_version,
+                .ok = true,
+                .action = "activate_profile",
+                .dry_run = true,
+                .profile = sector,
+            });
             try out.print("dry run: profile {d} would be activated\n", .{sector});
             return;
         }
         try device.activateProfile(sector);
+        if (options.json) return writeJson(out, .{
+            .schema_version = json_schema_version,
+            .ok = true,
+            .action = "activate_profile",
+            .dry_run = false,
+            .profile = sector,
+        });
         try out.print("profile {d} activated\n", .{sector});
         return;
     }
@@ -369,6 +530,13 @@ fn profileCommand(io: std.Io, allocator: std.mem.Allocator, device: Device, word
         defer allocator.free(bytes);
         try core.profile.validate(bytes);
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = words[3], .data = bytes });
+        if (options.json) return writeJson(out, .{
+            .schema_version = json_schema_version,
+            .ok = true,
+            .action = "export_profile",
+            .profile = sector,
+            .path = words[3],
+        });
         try out.print("profile {d} exported to {s}\n", .{ sector, words[3] });
         return;
     }
@@ -380,12 +548,30 @@ fn profileCommand(io: std.Io, allocator: std.mem.Allocator, device: Device, word
         defer allocator.free(original);
         try core.profile.validate(original);
         if (options.dry_run) {
+            if (options.json) return writeJson(out, .{
+                .schema_version = json_schema_version,
+                .ok = true,
+                .action = "apply_profile",
+                .dry_run = true,
+                .profile = sector,
+                .path = words[3],
+            });
             try out.print("dry run: {s} would be applied to profile {d}\n", .{ words[3], sector });
             return;
         }
-        try saveBackup(io, sector, original, out);
+        const backup = try saveBackup(io, allocator, sector, original);
         try device.writeSector(allocator, sector, bytes);
         if (try profileSlot(try device.currentProfile()) == sector) try device.activateProfile(sector);
+        if (options.json) return writeJson(out, .{
+            .schema_version = json_schema_version,
+            .ok = true,
+            .action = "apply_profile",
+            .dry_run = false,
+            .profile = sector,
+            .path = words[3],
+            .backup = backup,
+        });
+        if (backup.created) try out.print("backup saved to {s}\n", .{backup.path});
         try out.print("{s} applied and verified as profile {d}\n", .{ words[3], sector });
         return;
     }
@@ -467,7 +653,12 @@ fn validateProfileNumber(device: Device, sector: u8) !void {
     if (sector < 1 or sector > info.count) return error.InvalidProfile;
 }
 
-fn saveBackup(io: std.Io, sector: u8, bytes: []const u8, out: *std.Io.Writer) !void {
+const BackupResult = struct {
+    path: []const u8,
+    created: bool,
+};
+
+fn saveBackup(io: std.Io, allocator: std.mem.Allocator, sector: u8, bytes: []const u8) !BackupResult {
     var name_buffer: [64]u8 = undefined;
     const name = try std.fmt.bufPrint(&name_buffer, "px2-profile-{d}.backup.bin", .{sector});
     std.Io.Dir.cwd().writeFile(io, .{
@@ -475,10 +666,10 @@ fn saveBackup(io: std.Io, sector: u8, bytes: []const u8, out: *std.Io.Writer) !v
         .data = bytes,
         .flags = .{ .exclusive = true },
     }) catch |err| switch (err) {
-        error.PathAlreadyExists => return,
+        error.PathAlreadyExists => return .{ .path = try allocator.dupe(u8, name), .created = false },
         else => return err,
     };
-    try out.print("backup saved to {s}\n", .{name});
+    return .{ .path = try allocator.dupe(u8, name), .created = true };
 }
 
 fn measureRate(io: std.Io, candidate: Candidate, options: Options, out: *std.Io.Writer) !void {
@@ -543,6 +734,7 @@ fn printHelp(out: *std.Io.Writer) !void {
         \\Usage:
         \\  px2 list [--json]
         \\  px2 status [--json]
+        \\  px2 snapshot [--json]
         \\  px2 doctor [--json]
         \\  px2 get hits|dpi|rate|profiles [--json]
         \\  px2 set hits left|right|both [--actuation N] [--rapid N] [--haptics N]

@@ -1,0 +1,55 @@
+id = "prox2-superstrike/prox2-superstrike"
+name = "PRO X2 SUPERSTRIKE"
+version = "0.1.0"
+plugin_api = 24
+author = "ProX2SuperStrike"
+license = "custom:unlicensed"
+dependencies = ["px2"]
+tags = ["hardware", "mouse", "gaming", "system"]
+icon = "mouse"
+description = "Monitor and configure a Logitech PRO X2 SUPERSTRIKE through px2."
+
+[[setting]]
+key = "connection"
+type = "select"
+label_key = "settings.connection.label"
+description_key = "settings.connection.description"
+default = "auto"
+options = [
+  { value = "auto", label_key = "settings.connection.options.auto" },
+  { value = "direct", label_key = "settings.connection.options.direct" },
+  { value = "receiver", label_key = "settings.connection.options.receiver" },
+]
+
+[[setting]]
+key = "refresh_interval"
+type = "int"
+label_key = "settings.refresh_interval.label"
+description_key = "settings.refresh_interval.description"
+default = 15
+min = 5
+max = 300
+
+[[setting]]
+key = "show_battery"
+type = "bool"
+label_key = "settings.show_battery.label"
+description_key = "settings.show_battery.description"
+default = true
+
+[[service]]
+id = "service"
+entry = "service.luau"
+
+[[widget]]
+id = "mouse"
+entry = "widget.luau"
+
+[[panel]]
+id = "control"
+entry = "panel.luau"
+width = 480
+height = 680
+placement = "floating"
+position = "center"
+dismiss_on_outside_click = true

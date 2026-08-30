@@ -1,7 +1,13 @@
 post_install() {
   echo 'Reconnect the PRO X2 SUPERSTRIKE so the new hidraw access rule takes effect.'
+  echo 'Run `systemd-tmpfiles --user --create /usr/lib/user-tmpfiles.d/prox2-superstrike.conf` once to expose the Noctalia v5 plugin to the current session.'
+  echo 'For a custom XDG_DATA_HOME, run `px2-noctalia-install install` instead.'
 }
 
 post_upgrade() {
   post_install
+}
+
+pre_remove() {
+  echo 'Before removal, run `px2-noctalia-install remove` as each user that enabled the Noctalia plugin.'
 }

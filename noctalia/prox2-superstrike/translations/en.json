@@ -1,0 +1,21 @@
+{
+  "settings": {
+    "connection": {
+      "label": "Connection",
+      "description": "Choose automatic discovery, the USB cable, or the LIGHTSPEED receiver.",
+      "options": {
+        "auto": "Automatic",
+        "direct": "Direct USB",
+        "receiver": "LIGHTSPEED receiver"
+      }
+    },
+    "refresh_interval": {
+      "label": "Refresh interval",
+      "description": "Seconds between background device snapshots."
+    },
+    "show_battery": {
+      "label": "Show battery percentage",
+      "description": "Show the battery percentage next to the mouse icon in the bar."
+    }
+  }
+}

@@ -1,0 +1,51 @@
+#!/bin/sh
+
+set -eu
+
+data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+link_path=$data_home/noctalia/plugins/prox2-superstrike
+package_path=/usr/share/prox2-superstrike/noctalia/prox2-superstrike
+action=${1:-install}
+
+case "$action" in
+  install)
+    if [ ! -d "$package_path" ]; then
+      echo "Package plugin payload not found: $package_path" >&2
+      exit 1
+    fi
+    if [ -L "$link_path" ] && [ "$(readlink "$link_path")" = "$package_path" ]; then
+      echo "Noctalia plugin already linked at $link_path"
+      exit 0
+    fi
+    if [ -e "$link_path" ] || [ -L "$link_path" ]; then
+      echo "Refusing to replace existing path: $link_path" >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$link_path")"
+    ln -s "$package_path" "$link_path"
+    echo "Linked Noctalia plugin at $link_path"
+    ;;
+  remove)
+    if [ -L "$link_path" ] && [ "$(readlink "$link_path")" = "$package_path" ]; then
+      rm "$link_path"
+      echo "Removed Noctalia plugin link at $link_path"
+    else
+      echo "No package-managed Noctalia plugin link found at $link_path"
+    fi
+    ;;
+  status)
+    if [ -L "$link_path" ] && [ "$(readlink "$link_path")" = "$package_path" ]; then
+      echo "linked: $link_path -> $package_path"
+    elif [ -e "$link_path" ] || [ -L "$link_path" ]; then
+      echo "occupied: $link_path"
+      exit 1
+    else
+      echo "not linked: $link_path"
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Usage: px2-noctalia-install [install|remove|status]" >&2
+    exit 2
+    ;;
+esac

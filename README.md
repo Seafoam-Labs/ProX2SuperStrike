@@ -26,6 +26,7 @@ Build and install a pacman package from the repository checkout with Shelly:
 cd packaging/arch
 shelly build --check PKGBUILD
 shelly install standard "$(makepkg --packagelist)"
+systemd-tmpfiles --user --create /usr/lib/user-tmpfiles.d/prox2-superstrike.conf
 ```
 
 Alternatively, use `makepkg` directly:
@@ -35,15 +36,33 @@ cd packaging/arch
 makepkg -si
 ```
 
-This installs `/usr/bin/px2`, the udev rule under `/usr/lib/udev/rules.d`, and
-the README under `/usr/share/doc/prox2-superstrike`. Reconnect the mouse after
-the first installation so logind applies the new device ACL.
+This installs `/usr/bin/px2`, the udev rule under `/usr/lib/udev/rules.d`, the
+Noctalia v5 plugin under `/usr/share/prox2-superstrike/noctalia`, and the README
+under `/usr/share/doc/prox2-superstrike`. The user-tmpfiles command links the
+plugin into Noctalia's default per-user data directory without replacing an
+existing plugin. If `XDG_DATA_HOME` is customized, use:
+
+```sh
+px2-noctalia-install install
+```
+
+Enable the plugin and add its widget from Noctalia Settings, or enable it from
+the command line:
+
+```sh
+noctalia msg plugins enable prox2-superstrike/prox2-superstrike
+```
+
+Left-click the bar widget to open the control panel, or open it directly with
+`noctalia msg panel-toggle prox2-superstrike/prox2-superstrike:control`. Reconnect the
+mouse after the first installation so logind applies the new device ACL.
 
 ## Examples
 
 ```sh
 px2 list
 px2 status --connection receiver
+px2 snapshot --json
 px2 get hits
 px2 set hits both --actuation 3 --rapid 2 --haptics 4 --dry-run
 px2 set dpi 1600 --profile 1 --dry-run

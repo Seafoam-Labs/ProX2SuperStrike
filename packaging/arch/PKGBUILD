@@ -2,11 +2,12 @@
 
 pkgname=prox2-superstrike
 pkgver=0.1.0
-pkgrel=2
+pkgrel=4
 pkgdesc='CLI for managing the Logitech PRO X2 SUPERSTRIKE over USB or LIGHTSPEED'
 arch=('x86_64' 'aarch64')
 license=('custom:unlicensed')
 depends=('systemd')
+optdepends=('noctalia: Noctalia v5 bar widget and control panel')
 makedepends=('zig>=0.16.0' 'zig<0.17.0')
 install=prox2-superstrike.install
 options=('!lto')
@@ -26,7 +27,10 @@ prepare() {
     "$project_root/build.zig.zon" \
     "$project_root/README.md" \
     "$project_root/src" \
+    "$project_root/noctalia" \
     "$project_root/packaging/70-logitech-superstrike.rules" \
+    "$project_root/packaging/prox2-superstrike-user.conf" \
+    "$project_root/packaging/px2-noctalia-install" \
     "$srcdir/$_source_subdir/"
 }
 
@@ -52,4 +56,14 @@ package() {
   install -Dm644 \
     "$srcdir/$_source_subdir/README.md" \
     "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm755 \
+    "$srcdir/$_source_subdir/px2-noctalia-install" \
+    "$pkgdir/usr/bin/px2-noctalia-install"
+  install -Dm644 \
+    "$srcdir/$_source_subdir/prox2-superstrike-user.conf" \
+    "$pkgdir/usr/lib/user-tmpfiles.d/prox2-superstrike.conf"
+  install -d "$pkgdir/usr/share/$pkgname/noctalia/prox2-superstrike"
+  cp -a \
+    "$srcdir/$_source_subdir/noctalia/prox2-superstrike/." \
+    "$pkgdir/usr/share/$pkgname/noctalia/prox2-superstrike/"
 }
