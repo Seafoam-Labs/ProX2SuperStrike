@@ -111,6 +111,10 @@ local function actionArgs(command)
     local profile = validInteger(command.profile, 1, 5)
     if profile == nil then return nil, "Invalid profile." end
     return { "px2", "profile", "activate", tostring(profile), "--json", "--connection", connection }
+  elseif action == "initialize-profile" then
+    local profile = validInteger(command.profile, 1, 5)
+    if profile == nil then return nil, "Invalid profile." end
+    return { "px2", "profile", "initialize", tostring(profile), "--from-factory", "--json", "--connection", connection }
   elseif action == "set-hits" then
     local target = command.target
     if target ~= "left" and target ~= "right" and target ~= "both" then return nil, "Invalid HITS target." end

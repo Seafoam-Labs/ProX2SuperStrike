@@ -66,15 +66,28 @@ px2 snapshot --json
 px2 get hits
 px2 set hits both --actuation 3 --rapid 2 --haptics 4 --dry-run
 px2 set dpi 1600 --profile 1 --dry-run
+px2 profile inspect --json
+px2 profile initialize 5 --from-factory --dry-run
 px2 profile export 1 profile-1.bin
 px2 doctor --json
 ```
 
-Profile writes are restricted to the known 255-byte format. The CLI validates
-the original CRC, preserves unknown bytes, saves `px2-profile-N.backup.bin`,
-updates the CRC, commits, and verifies the entire sector. Reported live DPI and
-polling-rate values may be stale on this firmware; `px2 get dpi` and
-`px2 get rate` read the persistent onboard profile instead.
+Factory profiles live in a read-only ROM bank. A factory-only profile is shown
+with its saved DPI and rate, but must be initialized before it can be edited:
+
+```sh
+px2 profile initialize 1 --from-factory --dry-run
+px2 profile initialize 1 --from-factory
+```
+
+Initialization clones the decodable factory template into the selected RAM
+slot, constructs a CRC-validated RAM control table if needed, and verifies the
+committed bytes. Backups are saved under
+`$XDG_STATE_HOME/px2/backups` (or `~/.local/state/px2/backups`); override this
+with `--backup-dir PATH`. Regular profile writes preserve unknown bytes, update
+the CRC, commit, and verify the entire sector. Reported live DPI and polling
+rate values may be stale on this firmware; `px2 get dpi` and `px2 get rate`
+read the active onboard profile image instead.
 
 This project is not affiliated with or endorsed by Logitech. Onboard-memory
 writes carry hardware risk; keep the generated backup files.

@@ -44,6 +44,14 @@ pub const ProfileInfo = struct {
     sector_size: u16,
 };
 
+pub const SectorInspection = struct {
+    bytes: []u8,
+    attempts: u8,
+    health: profile.SectorHealth,
+    stored_crc: u16,
+    computed_crc: u16,
+};
+
 pub const DpiRange = struct {
     min: u16,
     max: u16,
@@ -136,20 +144,16 @@ pub const Device = struct {
 
     pub fn dpiRange(self: Device) !DpiRange {
         const index = try self.session.feature(FeatureId.dpi);
-        var result: DpiRange = .{ .min = std.math.maxInt(u16), .max = 0, .step = 1 };
+        var result: DpiRange = .{ .min = 0, .max = 0, .step = 0 };
         var pending_range_max = false;
         for (0..32) |page| {
-            const response = try self.session.request(index, 2, &.{ 0, 0, @intCast(page) });
+            const response = self.session.request(index, 2, &.{ 0, 0, @intCast(page) }) catch break;
             const p = response.params();
-            if (p.len < 5) return error.InvalidFrame;
+            if (p.len < 5) break;
             var offset: usize = 3;
             while (offset + 1 < p.len) : (offset += 2) {
                 const value = readBe16(p[offset..][0..2]);
-                if (value == 0) {
-                    if (result.min == std.math.maxInt(u16) or result.max < result.min)
-                        return error.InvalidFrame;
-                    return result;
-                }
+                if (value == 0) return normalizeDpiRange(result);
                 if (pending_range_max) {
                     result.max = @max(result.max, value);
                     pending_range_max = false;
@@ -162,7 +166,7 @@ pub const Device = struct {
                 }
             }
         }
-        return error.InvalidFrame;
+        return normalizeDpiRange(result);
     }
 
     pub fn supportedRateMask(self: Device) !u16 {
@@ -181,16 +185,21 @@ pub const Device = struct {
 
     pub fn profileInfo(self: Device) !ProfileInfo {
         const index = try self.session.feature(FeatureId.onboard_profiles);
-        const response = try self.session.request(index, 0, &.{});
-        const p = response.params();
-        if (p.len < 9) return error.InvalidFrame;
-        return .{
-            .memory_model = p[0],
-            .format = p[1],
-            .count = p[3],
-            .button_count = p[5],
-            .sector_size = readBe16(p[7..][0..2]),
-        };
+        for (0..3) |_| {
+            const response = try self.session.request(index, 0, &.{});
+            const p = response.params();
+            if (p.len < 9) continue;
+            const info: ProfileInfo = .{
+                .memory_model = p[0],
+                .format = p[1],
+                .count = p[3],
+                .button_count = p[5],
+                .sector_size = readBe16(p[7..][0..2]),
+            };
+            if (info.memory_model == 1 and info.count >= 1 and info.count <= 8 and
+                info.sector_size >= 16 and info.sector_size <= 4096) return info;
+        }
+        return error.InvalidProfileInfo;
     }
 
     pub fn currentProfile(self: Device) !u16 {
@@ -228,31 +237,87 @@ pub const Device = struct {
         return bytes;
     }
 
+    pub fn inspectSector(self: Device, allocator: std.mem.Allocator, sector: u16) !SectorInspection {
+        var attempt: u8 = 1;
+        while (attempt <= 3) : (attempt += 1) {
+            const bytes = try self.readSector(allocator, sector);
+            const sector_health = profile.health(bytes);
+            const result: SectorInspection = .{
+                .bytes = bytes,
+                .attempts = attempt,
+                .health = sector_health,
+                .stored_crc = profile.storedCrc(bytes) catch 0,
+                .computed_crc = if (bytes.len >= 2) profile.crc16CcittFalse(bytes[0 .. bytes.len - 2]) else 0,
+            };
+            if (sector_health == .valid or attempt == 3) return result;
+            allocator.free(bytes);
+        }
+        unreachable;
+    }
+
+    pub fn readSectorValidated(self: Device, allocator: std.mem.Allocator, sector: u16) ![]u8 {
+        const inspected = try self.inspectSector(allocator, sector);
+        switch (inspected.health) {
+            .valid => return inspected.bytes,
+            .blank => {
+                allocator.free(inspected.bytes);
+                return error.BlankSector;
+            },
+            .invalid_crc => {
+                allocator.free(inspected.bytes);
+                return error.InvalidCrc;
+            },
+        }
+    }
+
     /// Writes only the known, CRC-validated Superstrike profile format and
     /// verifies the committed bytes by reading them back.
     pub fn writeSector(self: Device, allocator: std.mem.Allocator, sector: u16, bytes: []const u8) !void {
         if (sector == 0 or sector > 5) return error.RefusingUnsafeSector;
+        try profile.validate(bytes);
+        return self.writeValidatedSector(allocator, sector, bytes);
+    }
+
+    pub fn writeControlSector(self: Device, allocator: std.mem.Allocator, bytes: []const u8) !void {
+        const info = try self.profileInfo();
+        try profile.validate(bytes);
+        var entries: [8]profile.ControlEntry = undefined;
+        _ = try profile.parseControl(bytes, info.count, &entries);
+        return self.writeValidatedSector(allocator, 0, bytes);
+    }
+
+    fn writeValidatedSector(self: Device, allocator: std.mem.Allocator, sector: u16, bytes: []const u8) !void {
+        if (sector > 5) return error.RefusingUnsafeSector;
         try profile.validate(bytes);
         const info = try self.profileInfo();
         if (info.sector_size != profile.sector_size or bytes.len != info.sector_size)
             return error.UnsupportedLayout;
 
         const index = try self.session.feature(FeatureId.onboard_profiles);
-        _ = try self.session.request(index, 6, &.{
+        _ = self.session.request(index, 6, &.{
             @intCast(sector >> 8),    @intCast(sector & 0xff),    0, 0,
             @intCast(bytes.len >> 8), @intCast(bytes.len & 0xff),
-        });
+        }) catch |err| switch (err) {
+            error.TimedOut, error.InvalidArgument => {},
+            else => return err,
+        };
 
         var offset: usize = 0;
         while (offset < bytes.len) : (offset += 16) {
             var chunk: [16]u8 = @splat(0);
             const count = @min(16, bytes.len - offset);
             @memcpy(chunk[0..count], bytes[offset..][0..count]);
-            _ = try self.session.request(index, 7, &chunk);
+            _ = self.session.request(index, 7, chunk[0..count]) catch |err| switch (err) {
+                error.TimedOut, error.InvalidArgument => {},
+                else => return err,
+            };
         }
-        _ = try self.session.request(index, 8, &.{});
+        _ = self.session.request(index, 8, &.{}) catch |err| switch (err) {
+            error.TimedOut, error.InvalidArgument => {},
+            else => return err,
+        };
 
-        const actual = try self.readSector(allocator, sector);
+        const actual = try self.readSectorValidated(allocator, sector);
         defer allocator.free(actual);
         if (!std.mem.eql(u8, bytes, actual)) return error.VerificationFailed;
     }
@@ -275,4 +340,12 @@ pub const Device = struct {
 
 fn readBe16(bytes: *const [2]u8) u16 {
     return (@as(u16, bytes[0]) << 8) | bytes[1];
+}
+
+fn normalizeDpiRange(value: DpiRange) DpiRange {
+    return .{
+        .min = if (value.min < 100 or value.min > 44_000) 100 else value.min,
+        .max = if (value.max < 100 or value.max > 44_000) 44_000 else value.max,
+        .step = if (value.step == 0 or value.step > 100) 50 else value.step,
+    };
 }

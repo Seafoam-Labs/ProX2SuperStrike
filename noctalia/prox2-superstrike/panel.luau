@@ -2,6 +2,8 @@
 
 local status = noctalia.state.get("device_status")
 local selectedProfile = 1
+local selectionInitialized = false
+local initializeConfirmProfile = nil
 local leftHits = { actuation = 1, rapid = 1, haptics = 0 }
 local rightHits = { actuation = 1, rapid = 1, haptics = 0 }
 local connectionOptions = { "Automatic", "Direct USB", "LIGHTSPEED receiver" }
@@ -23,7 +25,7 @@ end
 local function activeProfile(data)
   local profiles = data.profiles or {}
   for _, profile in ipairs(profiles) do
-    if profile.sector == selectedProfile then return profile end
+    if profile.slot == selectedProfile then return profile end
   end
   return nil
 end
@@ -71,7 +73,7 @@ local function statusBody()
 
   local profileButtons = {}
   for _, item in ipairs(data.profiles or {}) do
-    local number = item.sector
+    local number = item.slot
     local label = if item.active then `Profile {number} · active` else `Profile {number}`
     table.insert(profileButtons, ui.button({
       text = label,
@@ -79,6 +81,7 @@ local function statusBody()
       enabled = not busy,
       onClick = function()
         selectedProfile = number
+        initializeConfirmProfile = nil
         render()
       end,
     }))
@@ -115,19 +118,29 @@ local function statusBody()
 
     section("Profiles", {
       ui.row({ gap = 6, wrap = true }, profileButtons),
-      ui.button({ text = `Activate profile {selectedProfile}`, onClick = "onActivateProfile", enabled = not busy, variant = "outline" }),
-      if profile ~= nil and not profile.crc_valid
-        then ui.label({ text = "This writable profile does not contain a valid px2 profile image; persistent DPI/rate writes are disabled.", color = "error", wrap = true })
-        else ui.label({ text = `Profile {selectedProfile} · {dpi} DPI · {savedRate} Hz`, color = "on_surface_variant" }),
+      ui.button({ text = `Activate profile {selectedProfile}`, onClick = "onActivateProfile", enabled = not busy and profile ~= nil and (profile.initialized or profile.active), variant = "outline" }),
+      if profile ~= nil and not profile.editable and profile.rom_health == "valid"
+        then ui.column({ gap = 6 }, {
+          ui.label({ text = `Profile {selectedProfile} is using its read-only factory image. Initialize a verified writable copy before changing DPI or polling rate.`, color = "on_surface_variant", wrap = true }),
+          ui.button({
+            text = if initializeConfirmProfile == selectedProfile then `Confirm initialize profile {selectedProfile}` else `Initialize profile {selectedProfile}`,
+            onClick = "onInitializeProfile",
+            enabled = not busy,
+            variant = if initializeConfirmProfile == selectedProfile then "primary" else "outline",
+          }),
+        })
+        else if profile ~= nil and not profile.editable
+          then ui.label({ text = `Profile {selectedProfile} cannot be edited: {profile.editable_reason or "no valid profile image"}.`, color = "error", wrap = true })
+          else ui.label({ text = `Profile {selectedProfile} · {dpi} DPI · {savedRate} Hz`, color = "on_surface_variant" }),
     }),
 
     section("DPI", {
-      ui.input({ key = `dpi-{selectedProfile}`, value = tostring(dpi), placeholder = "100–44000", onSubmit = "onDpiSubmit", enabled = not busy and profile ~= nil and profile.crc_valid }),
+      ui.input({ key = `dpi-{selectedProfile}`, value = tostring(dpi), placeholder = "100–44000", onSubmit = "onDpiSubmit", enabled = not busy and profile ~= nil and profile.editable }),
       ui.label({ text = "Enter a DPI value and press Enter. Persistent writes create and verify a backup.", color = "on_surface_variant", wrap = true }),
     }),
 
     section("Polling rate", {
-      ui.select({ options = rateLabels, selectedIndex = rateIndex(rates, savedRate), onChange = "onRate", enabled = not busy and profile ~= nil and profile.crc_valid }),
+      ui.select({ options = rateLabels, selectedIndex = rateIndex(rates, savedRate), onChange = "onRate", enabled = not busy and profile ~= nil and profile.editable }),
     }),
 
     section("Left HITS", {
@@ -168,7 +181,10 @@ local function syncStatus(value)
   if type(value) == "table" then status = value end
   local data = if type(status) == "table" then status.snapshot else nil
   if type(data) == "table" then
-    selectedProfile = data.active_profile or selectedProfile
+    if not selectionInitialized then
+      selectedProfile = data.active_profile or selectedProfile
+      selectionInitialized = true
+    end
     local hits = data.hits or {}
     if type(hits.left) == "table" then
       leftHits = { actuation = hits.left.actuation, rapid = hits.left.rapid_trigger, haptics = hits.left.haptics }
@@ -194,6 +210,16 @@ function onConnection(index, _text)
 end
 
 function onActivateProfile() send({ action = "activate-profile", profile = selectedProfile }) end
+
+function onInitializeProfile()
+  if initializeConfirmProfile ~= selectedProfile then
+    initializeConfirmProfile = selectedProfile
+    render()
+    return
+  end
+  initializeConfirmProfile = nil
+  send({ action = "initialize-profile", profile = selectedProfile })
+end
 
 function onDpiSubmit(value)
   local dpi = tonumber(value)

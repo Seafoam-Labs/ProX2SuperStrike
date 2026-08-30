@@ -16,13 +16,22 @@ const Options = struct {
     device_path: ?[]const u8 = null,
     timeout_ms: u32 = 750,
     profile: ?u8 = null,
+    backup_dir: ?[]const u8 = null,
 };
 
 pub fn run(init: std.process.Init, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     const parsed = try parseArgs(allocator, args[1..]);
-    const options = parsed.options;
+    var options = parsed.options;
+    if (options.backup_dir == null) {
+        if (init.environ_map.get("XDG_STATE_HOME")) |state_home|
+            options.backup_dir = try std.fs.path.join(allocator, &.{ state_home, "px2/backups" })
+        else if (init.environ_map.get("HOME")) |home|
+            options.backup_dir = try std.fs.path.join(allocator, &.{ home, ".local/state/px2/backups" })
+        else
+            options.backup_dir = "px2-backups";
+    }
     const words = parsed.words;
 
     return runParsed(init, allocator, options, words, stdout, stderr) catch |err| {
@@ -115,6 +124,10 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !struct { o
             i += 1;
             if (i >= args.len) return error.MissingOptionValue;
             options.profile = try std.fmt.parseInt(u8, args[i], 10);
+        } else if (eql(arg, "--backup-dir")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            options.backup_dir = args[i];
         } else {
             try words.append(allocator, arg);
         }
@@ -209,42 +222,14 @@ fn snapshot(allocator: std.mem.Allocator, device: Device, candidate: Candidate, 
     const reported_rate = try device.currentRate();
     const dpi_range = try device.dpiRange();
     const rate_mask = try device.supportedRateMask();
-    const active_sector = try device.currentProfile();
+    const inventory = try inspectProfiles(allocator, device);
+    const active_sector = inventory.current_sector;
     const active_profile = try profileSlot(active_sector);
-    const profile_info = try device.profileInfo();
-    if (profile_info.sector_size != core.profile.sector_size) return error.UnsupportedLayout;
 
     var rates: std.ArrayList(u16) = .empty;
     for ([_]u16{ 125, 250, 500, 1000, 2000, 4000, 8000 }, 0..) |hz, index| {
         if ((rate_mask & (@as(u16, 1) << @intCast(index))) != 0)
             try rates.append(allocator, hz);
-    }
-
-    var profiles: std.ArrayList(ProfileSummary) = .empty;
-    for (1..@as(usize, profile_info.count) + 1) |number| {
-        const sector: u8 = @intCast(number);
-        const bytes = try device.readSector(allocator, sector);
-        defer allocator.free(bytes);
-        core.profile.validate(bytes) catch {
-            try profiles.append(allocator, .{
-                .sector = sector,
-                .active = active_profile == sector,
-                .dpi_x = 0,
-                .dpi_y = 0,
-                .rate_hz = 0,
-                .crc_valid = false,
-            });
-            continue;
-        };
-        const saved_dpi = try core.profile.dpi(bytes);
-        try profiles.append(allocator, .{
-            .sector = sector,
-            .active = active_profile == sector,
-            .dpi_x = saved_dpi.x,
-            .dpi_y = saved_dpi.y,
-            .rate_hz = try core.profile.reportRate(bytes),
-            .crc_valid = true,
-        });
     }
 
     const value = .{
@@ -262,6 +247,8 @@ fn snapshot(allocator: std.mem.Allocator, device: Device, candidate: Candidate, 
         },
         .active_profile = active_profile,
         .active_sector = active_sector,
+        .profile_info = inventory.info,
+        .controls = .{ .ram = inventory.ram_control, .rom = inventory.rom_control },
         .reported = .{
             .dpi_x = reported_dpi.x,
             .dpi_y = reported_dpi.y,
@@ -277,7 +264,7 @@ fn snapshot(allocator: std.mem.Allocator, device: Device, candidate: Candidate, 
             .left = left,
             .right = right,
         },
-        .profiles = profiles.items,
+        .profiles = inventory.profiles,
     };
     if (options.json) return writeJson(out, value);
     try out.print("{s}: {d}%{s}, profile {d}, {d} DPI, {d} Hz\n", .{
@@ -325,9 +312,11 @@ fn get(allocator: std.mem.Allocator, device: Device, words: []const []const u8, 
     }
     if (eql(words[1], "profiles")) return listProfiles(allocator, device, options, out);
     if (eql(words[1], "dpi") or eql(words[1], "rate")) {
-        const active_sector = try device.currentProfile();
-        const active = try profileSlot(active_sector);
-        const bytes = try device.readSector(allocator, active_sector);
+        const inventory = try inspectProfiles(allocator, device);
+        const active = try profileSlot(inventory.current_sector);
+        const active_profile = try profileBySlot(inventory, active);
+        if (!active_profile.crc_valid) return error.NoValidProfile;
+        const bytes = try device.readSectorValidated(allocator, active_profile.source_sector);
         defer allocator.free(bytes);
         try core.profile.validate(bytes);
         const saved_dpi = try core.profile.dpi(bytes);
@@ -367,8 +356,11 @@ fn set(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const 
     if (eql(words[1], "dpi") or eql(words[1], "rate")) {
         if (words.len < 3) return error.MissingValue;
         const numeric = try std.fmt.parseInt(u16, words[2], 10);
-        const sector = try selectedProfile(device, options.profile);
-        const bytes = try device.readSector(allocator, sector);
+        const slot = try selectedProfile(device, options.profile);
+        const inventory = try inspectProfiles(allocator, device);
+        const selected = try profileBySlot(inventory, slot);
+        if (!selected.editable) return error.ProfileNeedsInitialization;
+        const bytes = try device.readSectorValidated(allocator, selected.writable_sector);
         defer allocator.free(bytes);
         try core.profile.validate(bytes);
         const setting_dpi = eql(words[1], "dpi");
@@ -380,7 +372,7 @@ fn set(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const 
             const mask = try device.supportedRateMask();
             if ((mask & (@as(u16, 1) << @intCast(rate_index))) == 0) return error.UnsupportedRate;
         }
-        const backup = if (!options.dry_run) try saveBackup(io, allocator, sector, bytes) else null;
+        const backup = if (!options.dry_run) try saveBackupAt(io, allocator, options.backup_dir.?, slot, bytes) else null;
         if (setting_dpi)
             try core.profile.setDpi(bytes, numeric)
         else
@@ -392,25 +384,25 @@ fn set(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const 
                 .ok = true,
                 .action = if (setting_dpi) "set_dpi" else "set_rate",
                 .dry_run = true,
-                .profile = sector,
+                .profile = slot,
                 .value = numeric,
             });
-            try out.print("dry run: profile {d} would be updated to {s} {d}\n", .{ sector, words[1], numeric });
+            try out.print("dry run: profile {d} would be updated to {s} {d}\n", .{ slot, words[1], numeric });
             return;
         }
-        try device.writeSector(allocator, sector, bytes);
-        if (try profileSlot(try device.currentProfile()) == sector) try device.activateProfile(sector);
+        try device.writeSector(allocator, selected.writable_sector, bytes);
+        if (try profileSlot(try device.currentProfile()) == slot) try device.activateProfile(selected.writable_sector);
         if (options.json) return writeJson(out, .{
             .schema_version = json_schema_version,
             .ok = true,
             .action = if (setting_dpi) "set_dpi" else "set_rate",
             .dry_run = false,
-            .profile = sector,
+            .profile = slot,
             .value = numeric,
             .backup = backup.?,
         });
         if (backup.?.created) try out.print("backup saved to {s}\n", .{backup.?.path});
-        try out.print("profile {d} updated: {s} {d}\n", .{ sector, words[1], numeric });
+        try out.print("profile {d} updated: {s} {d}\n", .{ slot, words[1], numeric });
         return;
     }
     return error.InvalidSubcommand;
@@ -491,147 +483,436 @@ fn setHits(device: Device, words: []const []const u8, options: Options, out: *st
 fn profileCommand(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const []const u8, options: Options, out: *std.Io.Writer) !void {
     if (words.len < 2) return error.MissingSubcommand;
     if (eql(words[1], "list")) return listProfiles(allocator, device, options, out);
+    if (eql(words[1], "inspect")) {
+        const inventory = try inspectProfiles(allocator, device);
+        if (options.json) return writeJson(out, .{
+            .schema_version = json_schema_version,
+            .profile_info = inventory.info,
+            .current_sector = inventory.current_sector,
+            .controls = .{ .ram = inventory.ram_control, .rom = inventory.rom_control },
+            .profiles = inventory.profiles,
+        });
+        try printProfileInventory(out, inventory);
+        return;
+    }
+    if (eql(words[1], "inspect-sector")) {
+        if (words.len < 3) return error.MissingProfile;
+        const sector = try std.fmt.parseInt(u16, words[2], 0);
+        const inspected = try device.inspectSector(allocator, sector);
+        defer allocator.free(inspected.bytes);
+        return writeJson(out, sectorDiagnostic(sector, inspected));
+    }
     if (words.len < 3) return error.MissingProfile;
-    const sector = try std.fmt.parseInt(u8, words[2], 10);
-    try validateProfileNumber(device, sector);
+    const slot = try std.fmt.parseInt(u8, words[2], 10);
+    try validateProfileNumber(device, slot);
+    const inventory = try inspectProfiles(allocator, device);
+    const selected = try profileBySlot(inventory, slot);
+
+    if (eql(words[1], "initialize")) {
+        var from_factory = false;
+        for (words[3..]) |word| {
+            if (eql(word, "--from-factory")) from_factory = true else return error.InvalidOption;
+        }
+        if (!from_factory) return error.FactorySourceRequired;
+        return initializeProfile(io, allocator, device, inventory, selected, options, out);
+    }
 
     if (eql(words[1], "show")) {
-        const bytes = try device.readSector(allocator, sector);
+        if (!selected.crc_valid) return error.NoValidProfile;
+        const bytes = try device.readSectorValidated(allocator, selected.source_sector);
         defer allocator.free(bytes);
-        try core.profile.validate(bytes);
-        return showProfile(out, sector, bytes, options.json);
+        return showProfile(out, slot, selected.source_sector, bytes, options.json);
     }
     if (eql(words[1], "activate")) {
+        if (!selected.crc_valid) return error.NoValidProfile;
+        if (!selected.initialized and (selected.source_sector & 0xff) != slot)
+            return error.ProfileNeedsInitialization;
         if (options.dry_run) {
             if (options.json) return writeJson(out, .{
                 .schema_version = json_schema_version,
                 .ok = true,
                 .action = "activate_profile",
                 .dry_run = true,
-                .profile = sector,
+                .profile = slot,
+                .source_sector = selected.source_sector,
             });
-            try out.print("dry run: profile {d} would be activated\n", .{sector});
+            try out.print("dry run: profile {d} (sector 0x{x:0>4}) would be activated\n", .{ slot, selected.source_sector });
             return;
         }
-        try device.activateProfile(sector);
+        try device.activateProfile(selected.source_sector);
         if (options.json) return writeJson(out, .{
             .schema_version = json_schema_version,
             .ok = true,
             .action = "activate_profile",
             .dry_run = false,
-            .profile = sector,
+            .profile = slot,
+            .source_sector = selected.source_sector,
         });
-        try out.print("profile {d} activated\n", .{sector});
+        try out.print("profile {d} activated from sector 0x{x:0>4}\n", .{ slot, selected.source_sector });
         return;
     }
     if (eql(words[1], "export")) {
         if (words.len < 4) return error.MissingPath;
-        const bytes = try device.readSector(allocator, sector);
+        if (!selected.crc_valid) return error.NoValidProfile;
+        const bytes = try device.readSectorValidated(allocator, selected.source_sector);
         defer allocator.free(bytes);
-        try core.profile.validate(bytes);
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = words[3], .data = bytes });
         if (options.json) return writeJson(out, .{
             .schema_version = json_schema_version,
             .ok = true,
             .action = "export_profile",
-            .profile = sector,
+            .profile = slot,
+            .source_sector = selected.source_sector,
             .path = words[3],
         });
-        try out.print("profile {d} exported to {s}\n", .{ sector, words[3] });
+        try out.print("profile {d} exported to {s}\n", .{ slot, words[3] });
         return;
     }
     if (eql(words[1], "apply")) {
         if (words.len < 4) return error.MissingPath;
+        if (!selected.editable) return error.ProfileNeedsInitialization;
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, words[3], allocator, .limited(4096));
         try core.profile.validate(bytes);
-        const original = try device.readSector(allocator, sector);
+        const original = try device.readSectorValidated(allocator, selected.writable_sector);
         defer allocator.free(original);
-        try core.profile.validate(original);
         if (options.dry_run) {
             if (options.json) return writeJson(out, .{
                 .schema_version = json_schema_version,
                 .ok = true,
                 .action = "apply_profile",
                 .dry_run = true,
-                .profile = sector,
+                .profile = slot,
                 .path = words[3],
             });
-            try out.print("dry run: {s} would be applied to profile {d}\n", .{ words[3], sector });
+            try out.print("dry run: {s} would be applied to profile {d}\n", .{ words[3], slot });
             return;
         }
-        const backup = try saveBackup(io, allocator, sector, original);
-        try device.writeSector(allocator, sector, bytes);
-        if (try profileSlot(try device.currentProfile()) == sector) try device.activateProfile(sector);
+        const backup = try saveBackupAt(io, allocator, options.backup_dir.?, slot, original);
+        try device.writeSector(allocator, selected.writable_sector, bytes);
+        if (try profileSlot(try device.currentProfile()) == slot) try device.activateProfile(selected.writable_sector);
         if (options.json) return writeJson(out, .{
             .schema_version = json_schema_version,
             .ok = true,
             .action = "apply_profile",
             .dry_run = false,
-            .profile = sector,
+            .profile = slot,
             .path = words[3],
             .backup = backup,
         });
         if (backup.created) try out.print("backup saved to {s}\n", .{backup.path});
-        try out.print("{s} applied and verified as profile {d}\n", .{ words[3], sector });
+        try out.print("{s} applied and verified as profile {d}\n", .{ words[3], slot });
         return;
     }
     return error.InvalidSubcommand;
 }
 
+const SectorDiagnostic = struct {
+    sector: u16,
+    health: core.profile.SectorHealth,
+    attempts: u8,
+    stored_crc: u16,
+    computed_crc: u16,
+    first_bytes: [16]u8,
+};
+
+const ControlSummary = struct {
+    diagnostic: SectorDiagnostic,
+    entries: []const core.profile.ControlEntry,
+};
+
+const ProfileStorage = enum { ram, rom, unavailable };
+
 const ProfileSummary = struct {
-    sector: u8,
+    slot: u8,
+    source_sector: u16,
+    writable_sector: u8,
+    storage: ProfileStorage,
+    initialized: bool,
+    editable: bool,
+    editable_reason: ?[]const u8,
+    enabled: bool,
     active: bool,
     dpi_x: u16,
     dpi_y: u16,
     rate_hz: u16,
     crc_valid: bool,
+    ram_health: core.profile.SectorHealth,
+    rom_health: core.profile.SectorHealth,
 };
 
-fn listProfiles(allocator: std.mem.Allocator, device: Device, options: Options, out: *std.Io.Writer) !void {
+const ProfileInventory = struct {
+    info: core.device.ProfileInfo,
+    current_sector: u16,
+    ram_control: ControlSummary,
+    rom_control: ControlSummary,
+    profiles: []const ProfileSummary,
+};
+
+fn sectorDiagnostic(sector: u16, inspected: core.device.SectorInspection) SectorDiagnostic {
+    var first: [16]u8 = @splat(0);
+    @memcpy(first[0..@min(first.len, inspected.bytes.len)], inspected.bytes[0..@min(first.len, inspected.bytes.len)]);
+    return .{
+        .sector = sector,
+        .health = inspected.health,
+        .attempts = inspected.attempts,
+        .stored_crc = inspected.stored_crc,
+        .computed_crc = inspected.computed_crc,
+        .first_bytes = first,
+    };
+}
+
+fn inspectControl(allocator: std.mem.Allocator, device: Device, sector: u16, profile_count: u8) !ControlSummary {
+    const inspected = try device.inspectSector(allocator, sector);
+    defer allocator.free(inspected.bytes);
+    var entries_buffer: [8]core.profile.ControlEntry = undefined;
+    var diagnostic = sectorDiagnostic(sector, inspected);
+    const control_can_be_parsed = inspected.health == .valid or (sector & 0xff00) != 0;
+    const entries = if (control_can_be_parsed)
+        core.profile.parseControl(inspected.bytes, profile_count, &entries_buffer) catch &.{}
+    else
+        &.{};
+    if ((sector & 0xff00) != 0 and entries.len != 0) diagnostic.health = .valid;
+    return .{
+        .diagnostic = diagnostic,
+        .entries = try allocator.dupe(core.profile.ControlEntry, entries),
+    };
+}
+
+fn entryForSlot(control: ControlSummary, slot: u8) ?core.profile.ControlEntry {
+    for (control.entries) |entry| if (entry.slot == slot) return entry;
+    return null;
+}
+
+fn inspectProfiles(allocator: std.mem.Allocator, device: Device) !ProfileInventory {
     const info = try device.profileInfo();
-    if (info.sector_size != core.profile.sector_size) return error.UnsupportedLayout;
-    const active = try profileSlot(try device.currentProfile());
+    if (info.count == 0 or info.count > 8 or info.sector_size != core.profile.sector_size)
+        return error.UnsupportedLayout;
+    const current = try device.currentProfile();
+    const ram_control = try inspectControl(allocator, device, 0x0000, info.count);
+    const rom_control = try inspectControl(allocator, device, 0x0100, info.count);
+    const known_layout = info.memory_model == 1 and info.sector_size == core.profile.sector_size;
+    if (rom_control.entries.len == 0) return error.NoValidFactoryProfile;
+    const factory_sector = rom_control.entries[0].sector;
+    const mapped_factory_sector: u16 = if ((factory_sector & 0xff00) != 0)
+        factory_sector
+    else
+        @as(u16, 0x0100) | factory_sector;
+    var factory = try device.inspectSector(allocator, mapped_factory_sector);
+    defer allocator.free(factory.bytes);
+    if (factory.health == .invalid_crc) {
+        const factory_dpi = core.profile.dpi(factory.bytes) catch null;
+        const factory_rate = core.profile.reportRate(factory.bytes) catch null;
+        if (factory_dpi != null and factory_rate != null) factory.health = .valid;
+    }
+
     var summaries: std.ArrayList(ProfileSummary) = .empty;
     for (1..@as(usize, info.count) + 1) |number| {
-        const sector: u8 = @intCast(number);
-        const bytes = try device.readSector(allocator, sector);
-        defer allocator.free(bytes);
-        core.profile.validate(bytes) catch {
-            try summaries.append(allocator, .{
-                .sector = sector,
-                .active = active == sector,
-                .dpi_x = 0,
-                .dpi_y = 0,
-                .rate_hz = 0,
-                .crc_valid = false,
-            });
-            continue;
+        const slot: u8 = @intCast(number);
+        const ram_entry = entryForSlot(ram_control, slot);
+        const rom_entry = entryForSlot(rom_control, slot);
+        const writable_sector: u8 = if (ram_entry) |entry| @intCast(entry.sector & 0xff) else slot;
+        const ram = try device.inspectSector(allocator, writable_sector);
+        defer allocator.free(ram.bytes);
+
+        const initialized = ram.health == .valid;
+        const source_bytes = if (initialized) ram.bytes else if (factory.health == .valid) factory.bytes else null;
+        const storage: ProfileStorage = if (initialized) .ram else if (factory.health == .valid) .rom else .unavailable;
+        const source_sector: u16 = switch (storage) {
+            .ram => writable_sector,
+            .rom => mapped_factory_sector,
+            .unavailable => 0,
         };
-        const dpi = try core.profile.dpi(bytes);
+        var dpi_x: u16 = 0;
+        var dpi_y: u16 = 0;
+        var rate_hz: u16 = 0;
+        var decoded = false;
+        if (source_bytes) |bytes| {
+            if (core.profile.dpi(bytes)) |dpi| {
+                dpi_x = dpi.x;
+                dpi_y = dpi.y;
+                rate_hz = core.profile.reportRate(bytes) catch 0;
+                decoded = rate_hz != 0;
+            } else |_| {}
+        }
+        const editable = initialized and known_layout and decoded;
+        const reason: ?[]const u8 = if (editable)
+            null
+        else if (!known_layout)
+            "unsupported_layout"
+        else if (ram.health == .blank and factory.health == .valid)
+            "needs_initialization"
+        else if (ram.health == .invalid_crc and factory.health == .valid)
+            "ram_invalid_crc"
+        else if (factory.health != .valid)
+            "no_valid_factory_profile"
+        else
+            "profile_decode_failed";
+        const enabled = if (ram_entry) |entry|
+            entry.enabled
+        else if (rom_entry) |entry|
+            entry.enabled
+        else
+            slot == 1;
+
         try summaries.append(allocator, .{
-            .sector = sector,
-            .active = active == sector,
-            .dpi_x = dpi.x,
-            .dpi_y = dpi.y,
-            .rate_hz = try core.profile.reportRate(bytes),
-            .crc_valid = true,
+            .slot = slot,
+            .source_sector = source_sector,
+            .writable_sector = writable_sector,
+            .storage = storage,
+            .initialized = initialized,
+            .editable = editable,
+            .editable_reason = reason,
+            .enabled = enabled,
+            .active = (current & 0xff) == slot,
+            .dpi_x = dpi_x,
+            .dpi_y = dpi_y,
+            .rate_hz = rate_hz,
+            .crc_valid = source_bytes != null and decoded,
+            .ram_health = ram.health,
+            .rom_health = factory.health,
         });
     }
-    if (options.json) return writeJson(out, summaries.items);
-    for (summaries.items) |item| {
-        try out.print("{s} profile {d}: {d}x{d} DPI, {d} Hz, CRC {s}\n", .{
-            if (item.active) "*" else " ", item.sector,                             item.dpi_x, item.dpi_y,
-            item.rate_hz,                  if (item.crc_valid) "ok" else "INVALID",
+    return .{
+        .info = info,
+        .current_sector = current,
+        .ram_control = ram_control,
+        .rom_control = rom_control,
+        .profiles = try summaries.toOwnedSlice(allocator),
+    };
+}
+
+fn profileBySlot(inventory: ProfileInventory, slot: u8) !ProfileSummary {
+    for (inventory.profiles) |item| if (item.slot == slot) return item;
+    return error.InvalidProfile;
+}
+
+fn initializeProfile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    device: Device,
+    inventory: ProfileInventory,
+    selected: ProfileSummary,
+    options: Options,
+    out: *std.Io.Writer,
+) !void {
+    if (inventory.info.memory_model != 1 or inventory.info.sector_size != core.profile.sector_size)
+        return error.UnsupportedLayout;
+    if (selected.initialized) {
+        if (options.json) return writeJson(out, .{
+            .schema_version = json_schema_version,
+            .ok = true,
+            .action = "initialize_profile",
+            .profile = selected.slot,
+            .changed = false,
+            .editable = selected.editable,
         });
+        try out.print("profile {d} is already initialized in writable RAM\n", .{selected.slot});
+        return;
+    }
+    if (selected.rom_health != .valid or selected.source_sector < 0x0100)
+        return error.NoValidFactoryProfile;
+
+    const factory_raw = try device.readSector(allocator, selected.source_sector);
+    defer allocator.free(factory_raw);
+    _ = try core.profile.dpi(factory_raw);
+    _ = try core.profile.reportRate(factory_raw);
+    const factory = try allocator.dupe(u8, factory_raw);
+    defer allocator.free(factory);
+    try core.profile.refreshCrc(factory);
+    const ram_before = try device.readSector(allocator, selected.writable_sector);
+    defer allocator.free(ram_before);
+    const ram_control_before = try device.readSector(allocator, 0x0000);
+    defer allocator.free(ram_control_before);
+    const rom_control = try device.readSector(allocator, 0x0100);
+    defer allocator.free(rom_control);
+
+    const new_control = try allocator.alloc(u8, core.profile.sector_size);
+    defer allocator.free(new_control);
+    const needs_control = inventory.ram_control.diagnostic.health != .valid;
+    if (needs_control) try core.profile.controlForRam(rom_control, inventory.info.count, new_control);
+
+    if (options.dry_run) {
+        if (options.json) return writeJson(out, .{
+            .schema_version = json_schema_version,
+            .ok = true,
+            .action = "initialize_profile",
+            .dry_run = true,
+            .profile = selected.slot,
+            .source_sector = selected.source_sector,
+            .writable_sector = selected.writable_sector,
+            .would_initialize_control = needs_control,
+        });
+        try out.print("dry run: profile {d} would be cloned from factory sector 0x{x:0>4} to writable sector 0x{x:0>4}; control initialization: {s}\n", .{
+            selected.slot,
+            selected.source_sector,
+            selected.writable_sector,
+            if (needs_control) "yes" else "no",
+        });
+        return;
+    }
+
+    const backup_dir = try createBackupTransaction(io, allocator, options.backup_dir.?, selected.slot);
+    try writeBackupFile(io, allocator, backup_dir, "factory-profile-raw.bin", factory_raw);
+    try writeBackupFile(io, allocator, backup_dir, "factory-profile-writable.bin", factory);
+    try writeBackupFile(io, allocator, backup_dir, "ram-profile-before.bin", ram_before);
+    try writeBackupFile(io, allocator, backup_dir, "ram-control-before.bin", ram_control_before);
+    try writeBackupFile(io, allocator, backup_dir, "rom-control.bin", rom_control);
+
+    try device.writeSector(allocator, selected.writable_sector, factory);
+    if (needs_control) try device.writeControlSector(allocator, new_control);
+
+    const verified = try device.inspectSector(allocator, selected.writable_sector);
+    defer allocator.free(verified.bytes);
+    if (verified.health != .valid or !std.mem.eql(u8, verified.bytes, factory)) return error.WriteVerificationFailed;
+
+    if (options.json) return writeJson(out, .{
+        .schema_version = json_schema_version,
+        .ok = true,
+        .action = "initialize_profile",
+        .dry_run = false,
+        .profile = selected.slot,
+        .writable_sector = selected.writable_sector,
+        .initialized_control = needs_control,
+        .backup_dir = backup_dir,
+    });
+    try out.print("profile {d} initialized and verified; backup saved to {s}\n", .{ selected.slot, backup_dir });
+}
+
+fn listProfiles(allocator: std.mem.Allocator, device: Device, options: Options, out: *std.Io.Writer) !void {
+    const inventory = try inspectProfiles(allocator, device);
+    if (options.json) return writeJson(out, inventory.profiles);
+    try printProfileInventory(out, inventory);
+}
+
+fn printProfileInventory(out: *std.Io.Writer, inventory: ProfileInventory) !void {
+    try out.print("control RAM: {s} ({d} attempts), ROM: {s} ({d} attempts)\n", .{
+        @tagName(inventory.ram_control.diagnostic.health),
+        inventory.ram_control.diagnostic.attempts,
+        @tagName(inventory.rom_control.diagnostic.health),
+        inventory.rom_control.diagnostic.attempts,
+    });
+    for (inventory.profiles) |item| {
+        try out.print("{s} profile {d}: {d}x{d} DPI, {d} Hz, {s} sector 0x{x:0>4}, editable {s}", .{
+            if (item.active) "*" else " ",
+            item.slot,
+            item.dpi_x,
+            item.dpi_y,
+            item.rate_hz,
+            @tagName(item.storage),
+            item.source_sector,
+            if (item.editable) "yes" else "no",
+        });
+        if (item.editable_reason) |reason| try out.print(" ({s})", .{reason});
+        try out.writeByte('\n');
     }
 }
 
-fn showProfile(out: *std.Io.Writer, sector: u8, bytes: []const u8, json: bool) !void {
+fn showProfile(out: *std.Io.Writer, slot: u8, source_sector: u16, bytes: []const u8, json: bool) !void {
     const dpi = try core.profile.dpi(bytes);
     const rate = try core.profile.reportRate(bytes);
-    const value = .{ .sector = sector, .dpi_x = dpi.x, .dpi_y = dpi.y, .rate_hz = rate, .crc_valid = true };
+    const value = .{ .profile = slot, .source_sector = source_sector, .dpi_x = dpi.x, .dpi_y = dpi.y, .rate_hz = rate, .crc_valid = true };
     if (json) return writeJson(out, value);
-    try out.print("profile {d}: {d} x {d} DPI, {d} Hz, CRC ok\n", .{ sector, dpi.x, dpi.y, rate });
+    try out.print("profile {d} (sector 0x{x:0>4}): {d} x {d} DPI, {d} Hz, CRC ok\n", .{ slot, source_sector, dpi.x, dpi.y, rate });
 }
 
 fn selectedProfile(device: Device, requested: ?u8) !u8 {
@@ -658,18 +939,37 @@ const BackupResult = struct {
     created: bool,
 };
 
-fn saveBackup(io: std.Io, allocator: std.mem.Allocator, sector: u8, bytes: []const u8) !BackupResult {
-    var name_buffer: [64]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buffer, "px2-profile-{d}.backup.bin", .{sector});
+fn saveBackupAt(io: std.Io, allocator: std.mem.Allocator, backup_dir: []const u8, sector: u8, bytes: []const u8) !BackupResult {
+    try std.Io.Dir.cwd().createDirPath(io, backup_dir);
+    const millis = std.Io.Clock.real.now(io).toMilliseconds();
+    const name = try std.fmt.allocPrint(allocator, "px2-profile-{d}-{d}.backup.bin", .{ sector, millis });
+    const path = try std.fs.path.join(allocator, &.{ backup_dir, name });
     std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = name,
+        .sub_path = path,
         .data = bytes,
         .flags = .{ .exclusive = true },
     }) catch |err| switch (err) {
-        error.PathAlreadyExists => return .{ .path = try allocator.dupe(u8, name), .created = false },
+        error.PathAlreadyExists => return .{ .path = path, .created = false },
         else => return err,
     };
-    return .{ .path = try allocator.dupe(u8, name), .created = true };
+    return .{ .path = path, .created = true };
+}
+
+fn createBackupTransaction(io: std.Io, allocator: std.mem.Allocator, root: []const u8, slot: u8) ![]const u8 {
+    const millis = std.Io.Clock.real.now(io).toMilliseconds();
+    const leaf = try std.fmt.allocPrint(allocator, "initialize-profile-{d}-{d}", .{ slot, millis });
+    const path = try std.fs.path.join(allocator, &.{ root, leaf });
+    try std.Io.Dir.cwd().createDirPath(io, path);
+    return path;
+}
+
+fn writeBackupFile(io: std.Io, allocator: std.mem.Allocator, directory: []const u8, name: []const u8, bytes: []const u8) !void {
+    const path = try std.fs.path.join(allocator, &.{ directory, name });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = bytes,
+        .flags = .{ .exclusive = true },
+    });
 }
 
 fn measureRate(io: std.Io, candidate: Candidate, options: Options, out: *std.Io.Writer) !void {
@@ -740,7 +1040,8 @@ fn printHelp(out: *std.Io.Writer) !void {
         \\  px2 set hits left|right|both [--actuation N] [--rapid N] [--haptics N]
         \\  px2 set dpi DPI [--profile N] [--dry-run]
         \\  px2 set rate HZ [--profile N] [--dry-run]
-        \\  px2 profile list|show N|activate N
+        \\  px2 profile list|inspect|show N|activate N
+        \\  px2 profile initialize N --from-factory [--dry-run]
         \\  px2 profile export N FILE
         \\  px2 profile apply N FILE [--dry-run]
         \\  px2 rate measure
@@ -751,6 +1052,7 @@ fn printHelp(out: *std.Io.Writer) !void {
         \\  --timeout MILLISECONDS
         \\  --json
         \\  --dry-run
+        \\  --backup-dir PATH
         \\
     );
 }
