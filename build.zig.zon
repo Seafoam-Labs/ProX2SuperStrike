@@ -1,0 +1,13 @@
+.{
+    .name = .prox2_superstrike,
+    .version = "0.1.0",
+    .fingerprint = 0xcb2d4fe54f3eb85e,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "packaging",
+    },
+}

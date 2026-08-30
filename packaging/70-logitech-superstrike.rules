@@ -1,0 +1,5 @@
+# PRO X2 SUPERSTRIKE direct USB connection
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a8", TAG+="uaccess"
+
+# PRO X2 SUPERSTRIKE LIGHTSPEED receiver
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c54d", TAG+="uaccess"

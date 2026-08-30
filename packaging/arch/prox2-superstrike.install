@@ -1,0 +1,7 @@
+post_install() {
+  echo 'Reconnect the PRO X2 SUPERSTRIKE so the new hidraw access rule takes effect.'
+}
+
+post_upgrade() {
+  post_install
+}

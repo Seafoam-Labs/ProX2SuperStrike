@@ -1,0 +1,55 @@
+# Maintainer: Local package
+
+pkgname=prox2-superstrike
+pkgver=0.1.0
+pkgrel=2
+pkgdesc='CLI for managing the Logitech PRO X2 SUPERSTRIKE over USB or LIGHTSPEED'
+arch=('x86_64' 'aarch64')
+license=('custom:unlicensed')
+depends=('systemd')
+makedepends=('zig>=0.16.0' 'zig<0.17.0')
+install=prox2-superstrike.install
+options=('!lto')
+source=()
+sha256sums=()
+
+_source_subdir="$pkgname-$pkgver"
+
+prepare() {
+  local project_root
+  project_root="$(realpath "$startdir/../..")"
+
+  rm -rf "$srcdir/$_source_subdir"
+  install -d "$srcdir/$_source_subdir"
+  cp -a \
+    "$project_root/build.zig" \
+    "$project_root/build.zig.zon" \
+    "$project_root/README.md" \
+    "$project_root/src" \
+    "$project_root/packaging/70-logitech-superstrike.rules" \
+    "$srcdir/$_source_subdir/"
+}
+
+build() {
+  cd "$srcdir/$_source_subdir"
+  ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache" \
+    zig build -Doptimize=ReleaseSafe
+}
+
+check() {
+  cd "$srcdir/$_source_subdir"
+  ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache" \
+    zig build test
+}
+
+package() {
+  install -Dm755 \
+    "$srcdir/$_source_subdir/zig-out/bin/px2" \
+    "$pkgdir/usr/bin/px2"
+  install -Dm644 \
+    "$srcdir/$_source_subdir/70-logitech-superstrike.rules" \
+    "$pkgdir/usr/lib/udev/rules.d/70-logitech-superstrike.rules"
+  install -Dm644 \
+    "$srcdir/$_source_subdir/README.md" \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

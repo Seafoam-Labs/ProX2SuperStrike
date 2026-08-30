@@ -1,0 +1,6 @@
+/.BUILDINFO
+/.MTREE
+/.PKGINFO
+/*.pkg.tar.*
+/pkg/
+/src/
