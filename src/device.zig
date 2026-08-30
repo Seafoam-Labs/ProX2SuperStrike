@@ -142,6 +142,21 @@ pub const Device = struct {
         };
     }
 
+    /// Matches Solaar's ExtendedAdjustableDpi write: sensor index, big-endian
+    /// X/Y values, then the current lift-off-distance value.
+    pub fn setCurrentDpi(self: Device, value: u16) !void {
+        const current = try self.currentDpi();
+        const index = try self.session.feature(FeatureId.dpi);
+        _ = try self.session.request(index, 6, &.{
+            0,
+            @intCast(value >> 8),
+            @intCast(value & 0xff),
+            @intCast(value >> 8),
+            @intCast(value & 0xff),
+            current.lod,
+        });
+    }
+
     pub fn dpiRange(self: Device) !DpiRange {
         const index = try self.session.feature(FeatureId.dpi);
         var result: DpiRange = .{ .min = 0, .max = 0, .step = 0 };
@@ -183,9 +198,15 @@ pub const Device = struct {
         return @as(u16, 125) << @intCast(response.params()[0]);
     }
 
+    pub fn setCurrentRate(self: Device, hz: u16) !void {
+        const rate_index = try profile.rateIndex(hz);
+        const index = try self.session.feature(FeatureId.report_rate);
+        _ = try self.session.request(index, 3, &.{rate_index});
+    }
+
     pub fn profileInfo(self: Device) !ProfileInfo {
         const index = try self.session.feature(FeatureId.onboard_profiles);
-        for (0..3) |_| {
+        for (0..8) |_| {
             const response = try self.session.request(index, 0, &.{});
             const p = response.params();
             if (p.len < 9) continue;
@@ -209,9 +230,44 @@ pub const Device = struct {
         return readBe16(response.params()[0..2]);
     }
 
+    pub fn onboardMode(self: Device) !u8 {
+        const index = try self.session.feature(FeatureId.onboard_profiles);
+        const response = try self.session.request(index, 2, &.{});
+        if (response.params().len < 1) return error.InvalidFrame;
+        return response.params()[0];
+    }
+
+    pub fn setOnboardMode(self: Device, mode: u8) !void {
+        if (mode != 1 and mode != 2) return error.InvalidArgument;
+        const index = try self.session.feature(FeatureId.onboard_profiles);
+        _ = try self.session.request(index, 1, &.{mode});
+    }
+
     pub fn activateProfile(self: Device, sector: u16) !void {
+        try self.setOnboardMode(1);
         const index = try self.session.feature(FeatureId.onboard_profiles);
         _ = try self.session.request(index, 3, &.{ @intCast(sector >> 8), @intCast(sector & 0xff) });
+    }
+
+    /// Reapplies settings after an in-place profile write. Selecting the
+    /// already-current sector is a firmware no-op, so bounce through another
+    /// initialized sector (or host mode) before selecting the target again.
+    pub fn reloadProfile(self: Device, io: std.Io, target: u16, fallback: u16) !void {
+        try self.setOnboardMode(1);
+        if (fallback != target) {
+            self.activateProfile(fallback) catch |err| switch (err) {
+                error.InvalidArgument, error.OutOfRange => {
+                    try self.setOnboardMode(2);
+                    try std.Io.sleep(io, .fromMilliseconds(120), .awake);
+                    try self.setOnboardMode(1);
+                },
+                else => return err,
+            };
+            try std.Io.sleep(io, .fromMilliseconds(120), .awake);
+        }
+        try self.activateProfile(target);
+        try std.Io.sleep(io, .fromMilliseconds(120), .awake);
+        if (try self.currentProfile() != target) return error.ProfileReloadFailed;
     }
 
     pub fn readSector(self: Device, allocator: std.mem.Allocator, sector: u16) ![]u8 {

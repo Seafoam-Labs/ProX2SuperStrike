@@ -87,7 +87,23 @@ committed bytes. Backups are saved under
 with `--backup-dir PATH`. Regular profile writes preserve unknown bytes, update
 the CRC, commit, and verify the entire sector. Reported live DPI and polling
 rate values may be stale on this firmware; `px2 get dpi` and `px2 get rate`
-read the active onboard profile image instead.
+read the persistent onboard profile image instead. For the live controls, the
+CLI follows [Solaar's HID++ sequence](https://github.com/pwr-Solaar/Solaar): disable onboard profiles, then mirror the
+saved values through Extended Adjustable DPI (`0x2202`) and Extended Adjustable
+Report Rate (`0x8061`). `snapshot.effective` and the Noctalia widget use the
+persistent profile mirrored into host mode; `snapshot.reported` preserves the
+raw, commonly stale HID++ getter values for diagnostics.
+
+The Superstrike's format-8 profile is device-specific: its live sensor X/Y
+pair occupies the final two words of the legacy five-word DPI area (bytes
+9–12), and the resolution-index byte does not select that pair. `set dpi`
+patches only those four bytes and the profile CRC, preserving every unknown
+field.
+
+`px2 rate measure` reads the mouse's associated evdev motion node rather than
+the HID++ configuration node. Linux only emits evdev frames containing changed
+state, so the result is a movement-dependent lower bound, not a definitive USB
+polling-rate measurement.
 
 This project is not affiliated with or endorsed by Logitech. Onboard-memory
 writes carry hardware risk; keep the generated backup files.

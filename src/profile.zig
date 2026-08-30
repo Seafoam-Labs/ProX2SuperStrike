@@ -1,9 +1,11 @@
 const std = @import("std");
 
 pub const sector_size: usize = 255;
+// Format 8 stores the live sensor X/Y pair in the final two words of the
+// legacy five-word DPI area. The resolution-index byte does not select these
+// offsets on the PRO X2 SUPERSTRIKE.
 pub const active_dpi_x_offset: usize = 9;
 pub const active_dpi_y_offset: usize = 11;
-pub const write_count_offset: usize = 18;
 
 pub const Error = error{
     UnsupportedLayout,
@@ -118,7 +120,6 @@ pub fn setDpi(bytes: []u8, value: u16) Error!void {
     if (value < 100 or value > 44_000) return error.InvalidDpi;
     writeLe16(bytes[active_dpi_x_offset..][0..2], value);
     writeLe16(bytes[active_dpi_y_offset..][0..2], value);
-    bumpWriteCount(bytes);
     try refreshCrc(bytes);
 }
 
@@ -144,13 +145,7 @@ pub fn rateIndex(hz: u16) Error!u8 {
 pub fn setReportRate(bytes: []u8, hz: u16) Error!void {
     if (bytes.len != sector_size) return error.UnsupportedLayout;
     bytes[0] = try rateIndex(hz);
-    bumpWriteCount(bytes);
     try refreshCrc(bytes);
-}
-
-fn bumpWriteCount(bytes: []u8) void {
-    const current = readLe16(bytes[write_count_offset..][0..2]);
-    writeLe16(bytes[write_count_offset..][0..2], current +% 1);
 }
 
 fn readLe16(bytes: *const [2]u8) u16 {
@@ -178,7 +173,9 @@ test "CRC-16/CCITT-FALSE standard vector" {
 test "profile mutations preserve unrelated bytes and refresh CRC" {
     var bytes: [sector_size]u8 = @splat(0xa5);
     bytes[0] = 3;
-    writeLe16(bytes[write_count_offset..][0..2], 41);
+    bytes[1] = 3;
+    writeLe16(bytes[active_dpi_x_offset..][0..2], 1200);
+    writeLe16(bytes[active_dpi_y_offset..][0..2], 1200);
     try refreshCrc(&bytes);
     try validate(&bytes);
 
@@ -188,12 +185,31 @@ test "profile mutations preserve unrelated bytes and refresh CRC" {
     const current = try dpi(&bytes);
     try std.testing.expectEqual(@as(u16, 1600), current.x);
     try std.testing.expectEqual(@as(u16, 1600), current.y);
-    try std.testing.expectEqual(@as(u16, 42), readLe16(bytes[write_count_offset..][0..2]));
     for (bytes, 0..) |byte, i| {
-        const intentionally_changed = (i >= 9 and i <= 12) or
-            (i >= 18 and i <= 19) or i >= sector_size - 2;
+        const intentionally_changed = (i >= active_dpi_x_offset and i <= active_dpi_y_offset + 1) or
+            i >= sector_size - 2;
         if (!intentionally_changed) try std.testing.expectEqual(before[i], byte);
     }
+
+    const after_dpi = bytes;
+    try setReportRate(&bytes, 500);
+    try validate(&bytes);
+    for (bytes, 0..) |byte, i| {
+        const intentionally_changed = i == 0 or i >= sector_size - 2;
+        if (!intentionally_changed) try std.testing.expectEqual(after_dpi[i], byte);
+    }
+}
+
+test "format 8 live DPI pair ignores the resolution index" {
+    var bytes: [sector_size]u8 = @splat(0xff);
+    bytes[0] = 3;
+    bytes[1] = 3;
+    writeLe16(bytes[active_dpi_x_offset..][0..2], 2400);
+    writeLe16(bytes[active_dpi_y_offset..][0..2], 2400);
+    try refreshCrc(&bytes);
+    const current = try dpi(&bytes);
+    try std.testing.expectEqual(@as(u16, 2400), current.x);
+    try std.testing.expectEqual(@as(u16, 2400), current.y);
 }
 
 test "sector health distinguishes blank, corrupt, and valid data" {

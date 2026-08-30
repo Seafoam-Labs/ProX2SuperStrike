@@ -37,9 +37,10 @@ local function applyStatus(value)
 
   local device = data.device or {}
   local reported = data.reported or {}
+  local effective = data.effective or reported
   local charging = battery.charging and " · charging" or ""
   barWidget.setTooltip(
-    `{device.name or "PRO X2 SUPERSTRIKE"}\n{percent}%{charging}\n{device.connection or status.connection} · {reported.dpi_x or "?"} DPI · {reported.rate_hz or "?"} Hz · profile {data.active_profile or "?"}`
+    `{device.name or "PRO X2 SUPERSTRIKE"}\n{percent}%{charging}\n{device.connection or status.connection} · {effective.dpi_x or "?"} DPI · {effective.rate_hz or "?"} Hz · profile {data.active_profile or "?"}`
   )
 end
 
