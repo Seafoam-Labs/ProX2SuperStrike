@@ -94,7 +94,7 @@ pub fn connect(
                 saw_permission_denied = true;
                 continue;
             },
-            error.Unsupported => continue,
+            error.Unsupported, error.FileNotFound, error.NoDevice => continue,
             else => return err,
         };
     }

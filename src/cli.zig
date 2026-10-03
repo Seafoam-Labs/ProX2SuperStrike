@@ -17,6 +17,11 @@ const Options = struct {
     timeout_ms: u32 = 750,
     profile: ?u8 = null,
     backup_dir: ?[]const u8 = null,
+    state_dir: ?[]const u8 = null,
+    desired: core.state.Desired = .{},
+    connection_explicit: bool = false,
+    idle_seconds: u32 = 30,
+    trace: bool = false,
 };
 
 pub fn run(init: std.process.Init, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
@@ -24,6 +29,14 @@ pub fn run(init: std.process.Init, stdout: *std.Io.Writer, stderr: *std.Io.Write
     const args = try init.minimal.args.toSlice(allocator);
     const parsed = try parseArgs(allocator, args[1..]);
     var options = parsed.options;
+    if (options.state_dir == null) {
+        if (init.environ_map.get("XDG_STATE_HOME")) |state_home|
+            options.state_dir = try std.fs.path.join(allocator, &.{ state_home, "px2" })
+        else if (init.environ_map.get("HOME")) |home|
+            options.state_dir = try std.fs.path.join(allocator, &.{ home, ".local/state/px2" })
+        else
+            return error.MissingStateDirectory;
+    }
     if (options.backup_dir == null) {
         if (init.environ_map.get("XDG_STATE_HOME")) |state_home|
             options.backup_dir = try std.fs.path.join(allocator, &.{ state_home, "px2/backups" })
@@ -47,11 +60,12 @@ pub fn run(init: std.process.Init, stdout: *std.Io.Writer, stderr: *std.Io.Write
 fn runParsed(
     init: std.process.Init,
     allocator: std.mem.Allocator,
-    options: Options,
+    initial_options: Options,
     words: []const []const u8,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
+    var options = initial_options;
     if (words.len == 0 or eql(words[0], "help") or eql(words[0], "--help")) {
         try printHelp(stdout);
         return;
@@ -60,8 +74,25 @@ fn runParsed(
     if (eql(words[0], "list")) {
         return list(init.io, allocator, options, stdout);
     }
+    if (eql(words[0], "watch")) {
+        if (words.len == 2 and eql(words[1], "status")) return watchStatus(init.io, allocator, options, stdout);
+        if (words.len != 1 or options.dry_run or options.json or options.profile != null) return error.InvalidOption;
+        return core.watch.run(init.io, std.heap.page_allocator, options.state_dir.?, .{
+            .connection = if (options.connection_explicit) options.connection else null,
+            .device_path = options.device_path,
+            .timeout_ms = options.timeout_ms,
+            .idle_ms = @as(i64, options.idle_seconds) * 1000,
+            .trace = options.trace,
+        }, stderr);
+    }
     if (eql(words[0], "rate") and words.len >= 2 and eql(words[1], "measure"))
         return measureRate(init.io, allocator, options.device_path, options, stdout);
+
+    const store = stateStore(init.io, allocator, options);
+    const transaction = try store.acquire("device.lock", true);
+    defer transaction.close(init.io);
+    options.desired = try store.load();
+    if (!options.connection_explicit) options.connection = options.desired.connection;
 
     var connected = core.discovery.connect(
         init.io,
@@ -109,8 +140,10 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !struct { o
             i += 1;
             if (i >= args.len) return error.MissingOptionValue;
             options.connection = try parseConnection(args[i]);
+            options.connection_explicit = true;
         } else if (std.mem.startsWith(u8, arg, "--connection=")) {
             options.connection = try parseConnection(arg[13..]);
+            options.connection_explicit = true;
         } else if (eql(arg, "--device")) {
             i += 1;
             if (i >= args.len) return error.MissingOptionValue;
@@ -127,6 +160,17 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !struct { o
             i += 1;
             if (i >= args.len) return error.MissingOptionValue;
             options.backup_dir = args[i];
+        } else if (eql(arg, "--state-dir")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            options.state_dir = args[i];
+        } else if (eql(arg, "--idle-seconds")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            options.idle_seconds = try std.fmt.parseInt(u32, args[i], 10);
+            if (options.idle_seconds == 0 or options.idle_seconds > 86400) return error.InvalidOption;
+        } else if (eql(arg, "--trace")) {
+            options.trace = true;
         } else {
             try words.append(allocator, arg);
         }
@@ -163,7 +207,7 @@ fn status(allocator: std.mem.Allocator, device: Device, candidate: Candidate, op
     const rate = try device.currentRate();
     const inventory = try inspectProfiles(allocator, device);
     const active_sector = inventory.current_sector;
-    const active_profile = try activeProfileSlot(inventory);
+    const active_profile = try intendedProfileSlot(inventory, options);
     const effective = try profileBySlot(inventory, active_profile);
     const value = .{
         .schema_version = json_schema_version,
@@ -179,6 +223,9 @@ fn status(allocator: std.mem.Allocator, device: Device, candidate: Candidate, op
         .reported_dpi_x = dpi.x,
         .reported_dpi_y = dpi.y,
         .reported_rate_hz = rate,
+        .desired_profile = options.desired.slot(),
+        .effective_source = "saved_profile",
+        .effective_verified = false,
         .effective_dpi_x = effective.dpi_x,
         .effective_dpi_y = effective.dpi_y,
         .effective_rate_hz = effective.rate_hz,
@@ -190,11 +237,11 @@ fn status(allocator: std.mem.Allocator, device: Device, candidate: Candidate, op
         \\Device: {s} ({s}, index 0x{x:0>2})
         \\Path: {s}
         \\Battery: {d}%{s}
-        \\Active profile: {d} (sector 0x{x:0>4})
+        \\Selected profile: {d} (sector 0x{x:0>4})
         \\Reported DPI: {d} x {d} (firmware may return a stale value)
         \\Reported rate: {d} Hz (firmware may return a stale value)
-        \\Effective profile DPI: {d} x {d}
-        \\Effective profile rate: {d} Hz
+        \\Saved profile DPI: {d} x {d}
+        \\Saved profile rate: {d} Hz
         \\Left HITS: actuation {d}, rapid {d}, haptics {d}
         \\Right HITS: actuation {d}, rapid {d}, haptics {d}
         \\
@@ -234,7 +281,7 @@ fn snapshot(allocator: std.mem.Allocator, device: Device, candidate: Candidate, 
     const inventory = try inspectProfiles(allocator, device);
     const onboard_mode = try device.onboardMode();
     const active_sector = inventory.current_sector;
-    const active_profile = try activeProfileSlot(inventory);
+    const active_profile = try intendedProfileSlot(inventory, options);
     const effective = try profileBySlot(inventory, active_profile);
 
     var rates: std.ArrayList(u16) = .empty;
@@ -259,6 +306,8 @@ fn snapshot(allocator: std.mem.Allocator, device: Device, candidate: Candidate, 
         .active_profile = active_profile,
         .active_sector = active_sector,
         .onboard_mode = onboard_mode,
+        .desired_profile = options.desired.slot(),
+        .saved = .{ .dpi_x = effective.dpi_x, .dpi_y = effective.dpi_y, .rate_hz = effective.rate_hz },
         .profile_info = inventory.info,
         .controls = .{ .ram = inventory.ram_control, .rom = inventory.rom_control },
         .reported = .{
@@ -270,7 +319,8 @@ fn snapshot(allocator: std.mem.Allocator, device: Device, candidate: Candidate, 
             .dpi_x = effective.dpi_x,
             .dpi_y = effective.dpi_y,
             .rate_hz = effective.rate_hz,
-            .source = if (onboard_mode == 1) "active_profile" else "profile_mirrored_to_host",
+            .source = "saved_profile",
+            .verified = false,
         },
         .supported = .{
             .dpi = dpi_range,
@@ -331,7 +381,7 @@ fn get(allocator: std.mem.Allocator, device: Device, words: []const []const u8, 
     if (eql(words[1], "profiles")) return listProfiles(allocator, device, options, out);
     if (eql(words[1], "dpi") or eql(words[1], "rate")) {
         const inventory = try inspectProfiles(allocator, device);
-        const active = try activeProfileSlot(inventory);
+        const active = try intendedProfileSlot(inventory, options);
         const active_profile = try profileBySlot(inventory, active);
         if (!active_profile.crc_valid) return error.NoValidProfile;
         const bytes = try device.readSectorValidated(allocator, active_profile.source_sector);
@@ -370,11 +420,11 @@ fn get(allocator: std.mem.Allocator, device: Device, words: []const []const u8, 
 
 fn set(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const []const u8, options: Options, out: *std.Io.Writer) !void {
     if (words.len < 2) return error.MissingSubcommand;
-    if (eql(words[1], "hits")) return setHits(device, words, options, out);
+    if (eql(words[1], "hits")) return setHits(io, allocator, device, words, options, out);
     if (eql(words[1], "dpi") or eql(words[1], "rate")) {
         if (words.len < 3) return error.MissingValue;
         const numeric = try std.fmt.parseInt(u16, words[2], 10);
-        const slot = try selectedProfile(device, options.profile);
+        const slot = try selectedProfile(device, options.profile orelse options.desired.slot());
         const inventory = try inspectProfiles(allocator, device);
         const selected = try profileBySlot(inventory, slot);
         if (!selected.editable) return error.ProfileNeedsInitialization;
@@ -409,7 +459,7 @@ fn set(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const 
             return;
         }
         try device.writeSector(allocator, selected.writable_sector, bytes);
-        const reloaded = try activeProfileSlot(inventory) == slot;
+        const reloaded = try intendedProfileSlot(inventory, options) == slot;
         if (reloaded) try device.reloadProfile(
             io,
             selected.writable_sector,
@@ -419,7 +469,11 @@ fn set(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const 
         // disabled. Keep the profile write for persistence, then mirror both
         // saved values into host mode when this is the active profile.
         const live_settings_applied = reloaded;
-        if (live_settings_applied) try mirrorProfileToHost(io, device, bytes);
+        if (live_settings_applied) {
+            try mirrorProfileToHost(io, device, bytes);
+            try core.restore.hits(device, options.desired.hits[slot - 1]);
+            try rememberProfile(io, allocator, options, selected.writable_sector);
+        }
         if (options.json) return writeJson(out, .{
             .schema_version = json_schema_version,
             .ok = true,
@@ -441,17 +495,10 @@ fn set(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const 
 }
 
 fn mirrorProfileToHost(io: std.Io, device: Device, bytes: []const u8) !void {
-    try core.profile.validate(bytes);
-    const saved_dpi = try core.profile.dpi(bytes);
-    const saved_rate = try core.profile.reportRate(bytes);
-    try device.setOnboardMode(2);
-    try std.Io.sleep(io, .fromMilliseconds(120), .awake);
-    try device.setCurrentDpi(saved_dpi.x);
-    try device.setCurrentRate(saved_rate);
-    try std.Io.sleep(io, .fromMilliseconds(120), .awake);
+    return core.restore.mirror(io, device, bytes);
 }
 
-fn setHits(device: Device, words: []const []const u8, options: Options, out: *std.Io.Writer) !void {
+fn setHits(io: std.Io, allocator: std.mem.Allocator, device: Device, words: []const []const u8, options: Options, out: *std.Io.Writer) !void {
     if (words.len < 3) return error.MissingButton;
     const first: u8, const last: u8 = if (eql(words[2], "left"))
         .{ 0, 0 }
@@ -486,6 +533,14 @@ fn setHits(device: Device, words: []const []const u8, options: Options, out: *st
     if (rapid) |v| if (v < 1 or v > caps.max_rapid_trigger) return error.InvalidRapidTrigger;
     if (haptics) |v| if (v > caps.max_haptics) return error.InvalidHaptics;
 
+    const inventory = try inspectProfiles(allocator, device);
+    const slot = try intendedProfileSlot(inventory, options);
+    if (options.profile) |requested| if (requested != slot) return error.ProfileNotActive;
+    const selected = try profileBySlot(inventory, slot);
+    var saved_state = options.desired;
+    if (!selected.crc_valid) return error.NoValidProfile;
+    saved_state.sector = selected.source_sector;
+    saved_state.connection = options.connection;
     var left_result: ?HitsConfig = null;
     var right_result: ?HitsConfig = null;
     var button = first;
@@ -507,11 +562,19 @@ fn setHits(device: Device, words: []const []const u8, options: Options, out: *st
                 });
         } else {
             const updated = try device.setHits(button, actuation, rapid, haptics);
+            if (actuation) |v| if (updated.actuation != v) return error.HitsVerificationFailed;
+            if (rapid) |v| if (updated.rapid_trigger != v) return error.HitsVerificationFailed;
+            if (haptics) |v| if (updated.haptics != v) return error.HitsVerificationFailed;
+            const saved = &saved_state.hits[slot - 1][button];
+            if (actuation) |v| saved.actuation = v;
+            if (rapid) |v| saved.rapid_trigger = v;
+            if (haptics) |v| saved.haptics = v;
             if (button == 0) left_result = updated else right_result = updated;
             if (!options.json) try printHits(out, buttonName(button), updated);
         }
         if (button == 255) break;
     }
+    if (!options.dry_run) try stateStore(io, allocator, options).save(&saved_state);
     if (options.json) return writeJson(out, .{
         .schema_version = json_schema_version,
         .ok = true,
@@ -586,6 +649,8 @@ fn profileCommand(io: std.Io, allocator: std.mem.Allocator, device: Device, word
         const bytes = try device.readSectorValidated(allocator, selected.source_sector);
         defer allocator.free(bytes);
         try mirrorProfileToHost(io, device, bytes);
+        try core.restore.hits(device, options.desired.hits[slot - 1]);
+        try rememberProfile(io, allocator, options, selected.source_sector);
         if (options.json) return writeJson(out, .{
             .schema_version = json_schema_version,
             .ok = true,
@@ -636,13 +701,17 @@ fn profileCommand(io: std.Io, allocator: std.mem.Allocator, device: Device, word
         }
         const backup = try saveBackupAt(io, allocator, options.backup_dir.?, slot, original);
         try device.writeSector(allocator, selected.writable_sector, bytes);
-        const reloaded = try activeProfileSlot(inventory) == slot;
+        const reloaded = try intendedProfileSlot(inventory, options) == slot;
         if (reloaded) try device.reloadProfile(
             io,
             selected.writable_sector,
             try reloadFallbackSector(inventory, selected.writable_sector),
         );
-        if (reloaded) try mirrorProfileToHost(io, device, bytes);
+        if (reloaded) {
+            try mirrorProfileToHost(io, device, bytes);
+            try core.restore.hits(device, options.desired.hits[slot - 1]);
+            try rememberProfile(io, allocator, options, selected.writable_sector);
+        }
         if (options.json) return writeJson(out, .{
             .schema_version = json_schema_version,
             .ok = true,
@@ -883,6 +952,63 @@ fn activeProfileSlot(inventory: ProfileInventory) !u8 {
     for (inventory.profiles) |item| if (item.enabled) return item.slot;
     if (inventory.profiles.len != 0) return inventory.profiles[0].slot;
     return error.InvalidProfile;
+}
+
+fn intendedProfileSlot(inventory: ProfileInventory, options: Options) !u8 {
+    if (options.desired.slot()) |slot| {
+        _ = try profileBySlot(inventory, slot);
+        return slot;
+    }
+    return activeProfileSlot(inventory);
+}
+
+fn stateStore(io: std.Io, allocator: std.mem.Allocator, options: Options) core.state.Store {
+    return .{ .io = io, .allocator = allocator, .directory = options.state_dir.? };
+}
+
+fn rememberProfile(io: std.Io, allocator: std.mem.Allocator, options: Options, sector: u16) !void {
+    var desired = options.desired;
+    desired.sector = sector;
+    desired.connection = options.connection;
+    try stateStore(io, allocator, options).save(&desired);
+}
+
+fn watchStatus(io: std.Io, allocator: std.mem.Allocator, options: Options, out: *std.Io.Writer) !void {
+    const store = stateStore(io, allocator, options);
+    var running = false;
+    const probe = store.acquire("watch.lock", false) catch |err| switch (err) {
+        error.AlreadyRunning => blk: {
+            running = true;
+            break :blk null;
+        },
+        else => return err,
+    };
+    if (probe) |file| file.close(io);
+    var state_error: ?[]const u8 = null;
+    const desired = store.load() catch |err| blk: {
+        state_error = @errorName(err);
+        break :blk core.state.Desired{};
+    };
+    const last_status = try store.read(core.state.WatchStatus, "watch-status.json");
+    if (options.json) return writeJson(out, .{
+        .schema_version = json_schema_version,
+        .running = running,
+        .state_directory = options.state_dir.?,
+        .state_error = state_error,
+        .desired = desired,
+        .last_status = last_status,
+    });
+    try out.print("Watcher: {s}\nState: {s}\n", .{ if (running) "running" else "stopped", options.state_dir.? });
+    if (state_error) |err| try out.print("State error: {s}\n", .{err});
+    if (desired.slot()) |slot|
+        try out.print("Desired profile: {d} ({s})\n", .{ slot, @tagName(desired.connection) })
+    else
+        try out.writeAll("No saved selection. Run `px2 profile activate N` once.\n");
+    if (last_status) |s| {
+        try out.print("Last recorded phase: {s}\n", .{@tagName(s.phase)});
+        if (s.last_restore_ms) |ms| try out.print("Last successful restoration: {d} ms since epoch (live values unverified)\n", .{ms});
+        if (s.last_error) |err| try out.print("Last error: {s}\n", .{err});
+    }
 }
 
 fn factoryProfileSector(inventory: ProfileInventory) !u16 {
@@ -1271,6 +1397,8 @@ fn printHelp(out: *std.Io.Writer) !void {
         \\  px2 profile export N FILE
         \\  px2 profile apply N FILE [--dry-run]
         \\  px2 rate measure
+        \\  px2 watch [--idle-seconds 30] [--trace]
+        \\  px2 watch status [--json]
         \\
         \\Global options:
         \\  --connection auto|direct|receiver
@@ -1279,6 +1407,7 @@ fn printHelp(out: *std.Io.Writer) !void {
         \\  --json
         \\  --dry-run
         \\  --backup-dir PATH
+        \\  --state-dir PATH
         \\
     );
 }
@@ -1286,6 +1415,19 @@ fn printHelp(out: *std.Io.Writer) !void {
 test "connection option parsing" {
     try std.testing.expectEqual(core.discovery.Filter.receiver, try parseConnection("receiver"));
     try std.testing.expectError(error.InvalidConnection, parseConnection("bluetooth"));
+}
+
+test "watch options preserve explicit connection and reject zero idle threshold" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const parsed = try parseArgs(allocator, &.{ "watch", "--state-dir", "/tmp/test-state", "--connection=receiver", "--idle-seconds", "10", "--trace" });
+    try std.testing.expectEqual(@as(u32, 10), parsed.options.idle_seconds);
+    try std.testing.expect(parsed.options.trace and parsed.options.connection_explicit);
+    try std.testing.expectEqual(core.discovery.Filter.receiver, parsed.options.connection);
+    try std.testing.expectEqualStrings("/tmp/test-state", parsed.options.state_dir.?);
+    try std.testing.expectError(error.InvalidOption, parseArgs(allocator, &.{ "watch", "--idle-seconds", "0" }));
+    try std.testing.expectError(error.MissingOptionValue, parseArgs(allocator, &.{ "watch", "--state-dir" }));
 }
 
 test "ROM and RAM sectors map to the same profile slot" {

@@ -2,7 +2,7 @@
 
 pkgname=prox2-superstrike
 pkgver=0.1.0
-pkgrel=9
+pkgrel=10
 pkgdesc='CLI for managing the Logitech PRO X2 SUPERSTRIKE over USB or LIGHTSPEED'
 arch=('x86_64' 'aarch64')
 license=('custom:unlicensed')
@@ -31,6 +31,7 @@ prepare() {
     "$project_root/packaging/70-logitech-superstrike.rules" \
     "$project_root/packaging/prox2-superstrike-user.conf" \
     "$project_root/packaging/px2-noctalia-install" \
+    "$project_root/packaging/px2-watch.service" \
     "$srcdir/$_source_subdir/"
 }
 
@@ -50,6 +51,9 @@ package() {
   install -Dm755 \
     "$srcdir/$_source_subdir/zig-out/bin/px2" \
     "$pkgdir/usr/bin/px2"
+  install -Dm644 \
+    "$srcdir/$_source_subdir/px2-watch.service" \
+    "$pkgdir/usr/lib/systemd/user/px2-watch.service"
   install -Dm644 \
     "$srcdir/$_source_subdir/70-logitech-superstrike.rules" \
     "$pkgdir/usr/lib/udev/rules.d/70-logitech-superstrike.rules"

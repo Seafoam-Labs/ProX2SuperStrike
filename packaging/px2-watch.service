@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore PRO X2 SUPERSTRIKE settings after idle and reconnect
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/px2 watch
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

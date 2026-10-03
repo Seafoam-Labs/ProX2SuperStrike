@@ -145,14 +145,18 @@ pub const Device = struct {
     /// Matches Solaar's ExtendedAdjustableDpi write: sensor index, big-endian
     /// X/Y values, then the current lift-off-distance value.
     pub fn setCurrentDpi(self: Device, value: u16) !void {
+        return self.setCurrentDpiXY(value, value);
+    }
+
+    pub fn setCurrentDpiXY(self: Device, x: u16, y: u16) !void {
         const current = try self.currentDpi();
         const index = try self.session.feature(FeatureId.dpi);
         _ = try self.session.request(index, 6, &.{
             0,
-            @intCast(value >> 8),
-            @intCast(value & 0xff),
-            @intCast(value >> 8),
-            @intCast(value & 0xff),
+            @intCast(x >> 8),
+            @intCast(x & 0xff),
+            @intCast(y >> 8),
+            @intCast(y & 0xff),
             current.lod,
         });
     }

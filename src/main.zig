@@ -1,6 +1,10 @@
 const std = @import("std");
 const cli = @import("cli.zig");
 
+test {
+    _ = cli;
+}
+
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stderr_buffer: [1024]u8 = undefined;

@@ -1,7 +1,8 @@
 post_install() {
   echo 'Reconnect the PRO X2 SUPERSTRIKE so the new hidraw access rule takes effect.'
-  echo 'Run `systemd-tmpfiles --user --create /usr/lib/user-tmpfiles.d/prox2-superstrike.conf` once to expose the Noctalia v5 plugin to the current session.'
-  echo 'For a custom XDG_DATA_HOME, run `px2-noctalia-install install` instead.'
+  echo 'Select your profile once with `px2 profile activate N`, then run `systemctl --user enable --now px2-watch.service`.'
+  echo 'Use `px2 watch status` to inspect automatic restoration. Works with Pearl and other desktops.'
+  echo 'Optional Noctalia integration: run `px2-noctalia-install install`.'
 }
 
 post_upgrade() {
