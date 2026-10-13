@@ -6,19 +6,36 @@ USB cable and the LIGHTSPEED receiver.
 
 ## Install directly from this checkout
 
-With Zig 0.16 installed, run this as your normal desktop user:
+With Zig 0.16, GTK 4.12+ development files and pkg-config installed, run this
+as your normal desktop user:
 
 ```sh
 ./packaging/install.sh 1
 ```
 
 Replace `1` with your desired profile, or omit it to keep your saved selection.
-The script builds and tests the code, uses sudo to install `/usr/local/bin/px2`
-and the udev rules, then installs and enables the watcher as a user service.
+The script builds and tests the code, uses sudo to install `/usr/local/bin/px2`,
+`/usr/local/bin/px2-gui`, the desktop launcher and the udev rules, then installs
+and enables the watcher as a user service. Pass `--no-gui` for a CLI-only install.
 Wake the mouse before running it. If activation fails, installation still
 finishes and the script prints the command to retry after reconnecting.
 Rerun the script to install subsequent changes. It does not initialize or
 rewrite onboard profile sectors.
+
+## Native GTK configuration editor
+
+The default build includes the Pearl-style editor with Ghostty GObject bindings:
+
+```sh
+zig build
+./zig-out/bin/px2-gui
+```
+
+Requires Zig 0.16, GTK 4.12+ development files and pkg-config. The editor uses
+`px2` for device operations and provides profile, DPI, polling-rate, HITS,
+restoration and diagnostic views. See the [GUI guide](docs/GUI.md) for behavior,
+installation and testing, [native screenshots](docs/native/README.md), and the [design plan](docs/GUI_PLAN.md) and
+[interactive mockup](docs/mockups/index.html) for the original review artifacts.
 
 ## Build
 
@@ -28,6 +45,9 @@ zig build test
 python3 tests/watch_smoke.py
 ./zig-out/bin/px2 help
 ```
+
+For a CLI-only build without GTK or binding downloads, use `zig build -Dgui=false`
+and `zig build test -Dgui=false`.
 
 ## Permissions
 
@@ -52,7 +72,9 @@ cd packaging/arch
 makepkg -si
 ```
 
-This installs `/usr/bin/px2`, the udev rule under `/usr/lib/udev/rules.d`,
+The package includes `/usr/bin/px2-gui`, its desktop launcher and icon by default.
+Set `PX2_BUILD_GUI=0` when invoking Shelly or makepkg for a CLI-only package.
+This also installs `/usr/bin/px2`, the udev rule under `/usr/lib/udev/rules.d`,
 `px2-watch.service` under `/usr/lib/systemd/user`, optional Noctalia files,
 and the README under `/usr/share/doc/prox2-superstrike`. Reconnect the mouse
 after the first installation so logind applies the device ACL.

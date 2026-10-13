@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=PX2 Configuration
+Comment=Configure your PRO X2 SUPERSTRIKE
+Exec=px2-gui
+Icon=io.github.px2.Configurator
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=mouse;DPI;Logitech;SUPERSTRIKE;
+StartupNotify=true
+StartupWMClass=io.github.px2.Configurator

@@ -1,3 +1,7 @@
 /.zig-cache/
 zig-out/bin/
 /packaging/arch/prox2-superstrike-*.log
+/zig-pkg/
+/zig-out/
+
+__pycache__/

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>PX2 · Pearl GUI review</title><link rel="stylesheet" href="style.css"><script src="mockup.js" defer></script></head>
+<body>
+<header class="review"><div><span class="eyebrow">PEARL / APPLICATION STUDY</span><h1>PX2 configuration editor</h1><p>A native desktop companion for your SUPERSTRIKE.</p></div><div class="review-tools"><label>Preview state<select id="scenario"><option value="connected">Connected</option><option value="offline">Disconnected</option><option value="factory">Factory profile</option><option value="permission">Access denied</option><option value="partial">Partial apply failure</option></select></label><button id="theme" class="outlined" aria-pressed="false">Light appearance</button></div></header>
+<div class="window">
+<header class="titlebar"><div class="brand"><span data-icon="mouse"></span> PX2</div><span class="muted">PRO X2 SUPERSTRIKE</span><span class="window-controls" aria-hidden="true">− &nbsp; □ &nbsp; ×</span></header>
+<div class="workspace"><aside>
+<div class="device-art"><svg viewBox="0 0 160 180" aria-label="Stylized mouse illustration" role="img"><path d="M42 76C42 34 55 17 80 17s38 17 38 59l5 56c2 25-15 38-43 38s-45-13-43-38Z" fill="var(--high)" stroke="var(--outline)" stroke-width="1.4"/><path d="M43 77h74M80 18v59" stroke="var(--outline)" fill="none"/><path d="M49 67c0-26 9-40 24-43v45H49Z" fill="var(--selected)"/><rect x="75" y="38" width="10" height="24" rx="5" fill="var(--primary)"/><path d="M67 133h26M72 140h16" stroke="var(--secondary)" stroke-width="2" stroke-linecap="round"/></svg></div>
+<div class="device-name">PRO X2<br>SUPERSTRIKE</div><div id="connection-status" class="device-status">● LIGHTSPEED · 78%</div>
+<div class="divider"></div><div class="nav-label">ONBOARD PROFILES</div><nav id="profiles" aria-label="Profiles"></nav>
+<label class="mobile-profile">Profile<select id="mobile-profile" aria-label="Select profile"></select></label>
+<div class="sidebar-bottom"><button data-page="restoration"><span data-icon="restore"></span> Restoration <span class="dot"></span></button><button data-page="diagnostics"><span data-icon="activity"></span> Diagnostics</button><p>Automatic connection<br><span class="muted">Cable + LIGHTSPEED receiver</span></p></div>
+</aside><main>
+<div class="toolbar"><div><div class="eyebrow" id="section-kicker">DEVICE CONFIGURATION</div><h2 id="page-title">Profile 1 <span class="badge">Active</span></h2></div><button id="refresh" class="outlined"><span data-icon="refresh"></span> Refresh</button></div>
+<div class="tabs" role="group" aria-label="Editor section"><button data-page="sensitivity" aria-pressed="true">Sensitivity</button><button data-page="hits" aria-pressed="false">Buttons & HITS</button></div>
+<div class="viewport"><div id="banner" hidden></div><div id="content"></div></div>
+<footer class="actions"><div><strong id="dirty-title">No pending changes</strong><span id="dirty-detail">Edits are applied only when you choose Apply.</span></div><button id="discard" class="outlined" disabled>Discard</button><button id="apply" class="primary" disabled>Apply changes <span aria-hidden="true">→</span></button></footer>
+</main></div>
+<div class="statusbar"><span id="status-text">Saved profile values · live readings may be stale</span><span>PX2 · Pearl appearance</span></div></div>
+<footer class="review-note"><span>INTERACTIVE MOCKUP · FICTIONAL DEVICE DATA</span><p>Try profile selection, staged edits, HITS controls and alternate states. Changes stay in this preview.</p><a href="../GUI_PLAN.md">Implementation plan ↗</a></footer>
+<dialog id="dialog"><form method="dialog"><span class="eyebrow">PX2</span><h2 id="dialog-title"></h2><p id="dialog-body"></p><div><button value="cancel" class="outlined">Keep editing</button><button value="confirm" class="primary">Continue</button></div></form></dialog>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+</body></html>

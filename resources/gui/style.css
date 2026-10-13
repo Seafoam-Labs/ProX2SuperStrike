@@ -1,0 +1,49 @@
+/* Layout applies in all modes; System GTK deliberately inherits theme colors. */
+.px2-root { font-size: 1em; }
+.px2-root headerbar { min-height: 42px; box-shadow: none; }
+.px2-root .sidebar { padding: 20px 12px; border-right: 1px solid alpha(currentColor,.12); }
+.px2-root button { border-radius: 10px; padding: 8px 12px; box-shadow: none; }
+.px2-root .card { border-radius: 12px; padding: 20px; border: 1px solid alpha(currentColor,.12); }
+.px2-root .heading { font-size: 1.6em; font-weight: 500; }
+.px2-root .title { font-size: 1.15em; font-weight: 600; }
+.px2-root .eyebrow { font-size: .8em; letter-spacing: 1px; }
+.px2-root .secondary { font-size: .9em; }
+.px2-root .status { padding: 10px 16px; font-size: .8em; border-top: 1px solid alpha(currentColor,.12); }
+.px2-root .notice { padding: 12px; border-radius: 10px; border: 1px solid alpha(currentColor,.16); }
+.px2-root .footer { padding: 12px 20px; border-top: 1px solid alpha(currentColor,.12); }
+.px2-root spinbutton { font-size: 1.5em; border-radius: 10px; }
+.px2-root scale { padding: 10px 4px; }
+.px2-root.dark { background: #141218; color: #e6e0e9; }
+.px2-root.light { background: #fdf7ff; color: #1d1b20; }
+.px2-root.dark headerbar, .px2-root.dark .card { background: #211f26; }
+.px2-root.light headerbar, .px2-root.light .card { background: #f3edf7; }
+.px2-root.dark .sidebar, .px2-root.dark .footer { background: #1d1b20; }
+.px2-root.light .sidebar, .px2-root.light .footer { background: #f7f2fa; }
+.px2-root.dark .secondary, .px2-root.dark .status { color: #cac4d0; }
+.px2-root.light .secondary, .px2-root.light .status { color: #49454f; }
+.px2-root.dark .eyebrow { color: #d0bcff; }
+.px2-root.light .eyebrow { color: #6750a4; }
+.px2-root.dark button { background: transparent; color: #e6e0e9; border: 1px solid alpha(#79747e,.3); }
+.px2-root.light button { background: transparent; color: #1d1b20; border: 1px solid alpha(#79747e,.3); }
+.px2-root.dark button:hover { background: alpha(#e6e0e9,.08); }
+.px2-root.light button:hover { background: alpha(#1d1b20,.08); }
+.px2-root.dark button.active { background: #4f378b; color: #eaddff; }
+.px2-root.light button.active { background: #eaddff; color: #21005d; }
+.px2-root.dark button.suggested-action { background: #d0bcff; color: #381e72; }
+.px2-root.light button.suggested-action { background: #6750a4; color: #ffffff; }
+.px2-root button:disabled { opacity: .45; }
+.px2-root.dark spinbutton, .px2-root.dark dropdown > button { background: #2b2930; color: #e6e0e9; }
+.px2-root.light spinbutton, .px2-root.light dropdown > button { background: #ece6f0; color: #1d1b20; }
+.px2-root.dark scale trough { background: #2b2930; }
+.px2-root.light scale trough { background: #ece6f0; }
+.px2-root.dark scale highlight, .px2-root.dark scale slider { background: #d0bcff; }
+.px2-root.light scale highlight, .px2-root.light scale slider { background: #6750a4; }
+.px2-root.dark .error { color: #ffb4ab; }
+.px2-root.light .error { color: #8c1d18; }
+.px2-root.dark .notice { background: #2b2930; }
+.px2-root.light .notice { background: #ece6f0; }
+.px2-root headerbar windowcontrols button { min-width: 20px; min-height: 20px; padding: 4px; margin: 0; }
+.px2-root.dark scale highlight { background-image: none; border-color: #d0bcff; }
+.px2-root.light scale highlight { background-image: none; border-color: #6750a4; }
+.px2-root.dark scale value { color: #cac4d0; }
+.px2-root.light scale value { color: #49454f; }

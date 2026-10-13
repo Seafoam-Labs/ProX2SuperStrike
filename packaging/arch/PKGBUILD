@@ -2,7 +2,7 @@
 
 pkgname=prox2-superstrike
 pkgver=0.1.0
-pkgrel=10
+pkgrel=13
 pkgdesc='CLI for managing the Logitech PRO X2 SUPERSTRIKE over USB or LIGHTSPEED'
 arch=('x86_64' 'aarch64')
 license=('custom:unlicensed')
@@ -13,6 +13,15 @@ install=prox2-superstrike.install
 options=('!lto')
 source=()
 sha256sums=()
+
+# The GUI is included by default. Set PX2_BUILD_GUI=0 for a CLI-only package.
+_gui=false
+if [[ ${PX2_BUILD_GUI:-1} != 0 ]]; then
+  _gui=true
+  depends+=('gtk4>=4.12')
+  makedepends+=('pkgconf')
+  pkgdesc='CLI and Pearl-style GTK editor for the Logitech PRO X2 SUPERSTRIKE'
+fi
 
 _source_subdir="$pkgname-$pkgver"
 
@@ -27,27 +36,42 @@ prepare() {
     "$project_root/build.zig.zon" \
     "$project_root/README.md" \
     "$project_root/src" \
+    "$project_root/resources" \
+    "$project_root/tests" \
+    "$project_root/docs" \
     "$project_root/noctalia" \
     "$project_root/packaging/70-logitech-superstrike.rules" \
     "$project_root/packaging/prox2-superstrike-user.conf" \
     "$project_root/packaging/px2-noctalia-install" \
     "$project_root/packaging/px2-watch.service" \
     "$srcdir/$_source_subdir/"
+  # Never copy packaging/ recursively: it contains Shelly/makepkg's srcdir.
+  install -Dm644 "$project_root/packaging/px2-gui.desktop" \
+    "$srcdir/$_source_subdir/packaging/px2-gui.desktop"
 }
 
 build() {
   cd "$srcdir/$_source_subdir"
   ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache" \
-    zig build -Doptimize=ReleaseSafe
+    zig build -Doptimize=ReleaseSafe -Dgui="$_gui"
 }
 
 check() {
   cd "$srcdir/$_source_subdir"
   ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache" \
-    zig build test
+    zig build test -Dgui="$_gui"
+  if [[ $_gui == true ]]; then
+    ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache" zig build test-gui
+  fi
 }
 
 package() {
+  if [[ $_gui == true ]]; then
+    install -Dm755 "$srcdir/$_source_subdir/zig-out/bin/px2-gui" "$pkgdir/usr/bin/px2-gui"
+    install -Dm644 "$srcdir/$_source_subdir/packaging/px2-gui.desktop" "$pkgdir/usr/share/applications/io.github.px2.Configurator.desktop"
+    install -Dm644 "$srcdir/$_source_subdir/resources/gui/px2.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.px2.Configurator.svg"
+    install -Dm644 "$srcdir/$_source_subdir/docs/GUI.md" "$pkgdir/usr/share/doc/$pkgname/GUI.md"
+  fi
   install -Dm755 \
     "$srcdir/$_source_subdir/zig-out/bin/px2" \
     "$pkgdir/usr/bin/px2"
