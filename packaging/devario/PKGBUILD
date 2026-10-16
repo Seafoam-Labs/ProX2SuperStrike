@@ -1,0 +1,72 @@
+# Devario package; sources are independent of the local checkout.
+pkgname=prox2-superstrike
+pkgver=0.1.0
+pkgrel=15
+pkgdesc='CLI and GTK4 configuration editor for the Logitech PRO X2 SUPERSTRIKE'
+arch=('x86_64')
+url='https://github.com/Seafoam-Labs/ProX2SuperStrike'
+license=('custom:unlicensed')
+depends=('glibc' 'gtk4>=4.12' 'glib2' 'cairo' 'hicolor-icon-theme' 'systemd')
+optdepends=('noctalia: Noctalia v5 bar widget and control panel')
+makedepends=('git' 'zig>=0.16.0' 'zig<0.17.0' 'pkgconf')
+install=prox2-superstrike.install
+options=('!lto')
+
+_commit=7ba8d77149835e27636ff7975ba732ec1896e311
+_gobject=gobject-2026-07-28-36-1.tar.zst
+source=(
+  "$pkgname::git+https://github.com/Seafoam-Labs/ProX2SuperStrike.git#commit=$_commit"
+  "https://deps.files.ghostty.org/$_gobject"
+  'prox2-superstrike.install'
+)
+noextract=("$_gobject")
+sha256sums=(
+  'SKIP'
+  '9014db570db06e3fbfcfadb7b32aa8addacc6969e701650683c1c74428adba6c'
+  '558be2d9e2b14da1c38a38a06335b41dcec453376e154e6ba80322196de18fbe'
+)
+
+prepare() {
+  cd "$srcdir/$pkgname"
+  # Populate Zig's cache from the checksum-verified source, without network I/O.
+  ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache" \
+    zig fetch "$srcdir/$_gobject"
+}
+
+build() {
+  cd "$srcdir/$pkgname"
+  zig build -Doptimize=ReleaseSafe -Dcpu=baseline -Dgui=true \
+    --cache-dir "$srcdir/zig-cache" \
+    --global-cache-dir "$srcdir/zig-global-cache" \
+    --prefix "$srcdir/out"
+}
+
+check() {
+  cd "$srcdir/$pkgname"
+  zig build test test-gui -Doptimize=ReleaseSafe -Dcpu=baseline -Dgui=true \
+    --cache-dir "$srcdir/zig-cache" \
+    --global-cache-dir "$srcdir/zig-global-cache"
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+  install -Dm755 "$srcdir/out/bin/px2" "$pkgdir/usr/bin/px2"
+  install -Dm755 "$srcdir/out/bin/px2-gui" "$pkgdir/usr/bin/px2-gui"
+  install -Dm644 packaging/px2-gui.desktop \
+    "$pkgdir/usr/share/applications/io.github.px2.Configurator.desktop"
+  install -Dm644 resources/gui/px2.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.px2.Configurator.svg"
+  install -Dm644 packaging/70-logitech-superstrike.rules \
+    "$pkgdir/usr/lib/udev/rules.d/70-logitech-superstrike.rules"
+  install -Dm644 packaging/px2-watch.service \
+    "$pkgdir/usr/lib/systemd/user/px2-watch.service"
+  install -Dm644 packaging/prox2-superstrike-user.conf \
+    "$pkgdir/usr/lib/user-tmpfiles.d/prox2-superstrike.conf"
+  install -Dm755 packaging/px2-noctalia-install \
+    "$pkgdir/usr/bin/px2-noctalia-install"
+  install -d "$pkgdir/usr/share/$pkgname/noctalia/prox2-superstrike"
+  cp -a noctalia/prox2-superstrike/. \
+    "$pkgdir/usr/share/$pkgname/noctalia/prox2-superstrike/"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 docs/GUI.md "$pkgdir/usr/share/doc/$pkgname/GUI.md"
+}

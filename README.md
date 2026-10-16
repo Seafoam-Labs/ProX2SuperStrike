@@ -79,6 +79,27 @@ This also installs `/usr/bin/px2`, the udev rule under `/usr/lib/udev/rules.d`,
 and the README under `/usr/share/doc/prox2-superstrike`. Reconnect the mouse
 after the first installation so logind applies the device ACL.
 
+## Devario package
+
+The standalone recipe in `packaging/devario` builds the CLI and GTK editor for
+x86_64 using Zig 0.16 and baseline CPU settings. It fetches the pinned Git
+revision and checksum-verified GObject bindings, so it can be copied with its
+`prox2-superstrike.install` file into the Devario package repository without
+the rest of this checkout. The builder needs Git access to the upstream
+repository (including credentials if it is private).
+
+Using [Shelly's native build command](https://www.seafoam-labs.org/shelly-alpm/docs/build/):
+
+```sh
+cd packaging/devario
+shelly build -s --check --install PKGBUILD
+```
+
+Omit `--install` to build the package without installing it. This recipe always
+includes the GUI, watcher service, udev rule, and optional Noctalia integration.
+To update it, change `_commit` and the package version/release; if the bindings
+change in `build.zig.zon`, also update `_gobject` and its SHA-256 checksum.
+
 ## Automatic restoration with Pearl or other desktops
 
 Select your profile once, then enable the desktop-independent user service:

@@ -1,0 +1,14 @@
+post_install() {
+  echo 'Reconnect the PRO X2 SUPERSTRIKE so the new hidraw access rule takes effect.'
+  echo 'Select your profile once with `px2 profile activate N`, then run `systemctl --user enable --now px2-watch.service`.'
+  echo 'Use `px2 watch status` to inspect automatic restoration. Works with Pearl and other desktops.'
+  echo 'Optional Noctalia integration: run `px2-noctalia-install install`.'
+}
+
+post_upgrade() {
+  post_install
+}
+
+pre_remove() {
+  echo 'Before removal, run `px2-noctalia-install remove` as each user that enabled the Noctalia plugin.'
+}
